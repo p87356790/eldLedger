@@ -1,0 +1,27 @@
+# eldLedger Cursor Rules & Guidelines
+
+## 1. Project Overview & Architecture
+- **Project Name:** eldLedger (Self-hosted double-entry bookkeeping with intuitive cashbook UX)
+- **Architecture Principle:** Strict Separation of Concerns between `Transaction` (User view) and `JournalEntry` / `JournalLine` (Accounting view).
+- **Core Stacks:**
+  - Backend: Python 3.11+, FastAPI, SQLAlchemy 2.0 (declarative), Pydantic v2, Alembic
+  - Frontend: React 18+, TypeScript, Vite, Material UI (MUI), PWA
+  - Database: SQLite (stored at `/data/database/eldledger.db`)
+  - Currency: KRW (Use integer / BigInteger for all amounts, strictly NO float).
+
+## 2. Strict Accounting & Integrity Constraints
+- **Double-Entry Balance:** Every `JournalEntry` MUST satisfy `sum(debit) == sum(credit)`. Reject/raise error if unbalanced.
+- **Immutability:** Confirmed transactions and journal entries must NOT be directly deleted or updated in place. Use reversals/correction entries.
+- **Scope & Mixed Transactions:**
+  - Support `PERSONAL`, `BUSINESS`, and `MIXED` scopes.
+  - Multi-item split transactions must generate exact matching multi-line debits and credits.
+
+## 3. UI/UX Terminology Policy
+- **Primary Input Form:** NEVER expose technical accounting jargon (Debit, Credit, Journal, Ledger) to standard users.
+- Use intuitive Korean terms: 수입, 지출, 이체, 개인/사업 구분, 결제수단, 분류.
+- Technical terms are only displayed in the Advanced Reports section (시산표, 분개장, 총계정원장).
+
+## 4. Coding Style
+- Type hints strictly required (Python Pydantic / TypeScript Strict mode).
+- Follow Clean Architecture: `routers/` -> `services/` -> `repositories/` -> `models/`.
+- All core accounting rules must have unit tests verifying zero-balance invariant.
