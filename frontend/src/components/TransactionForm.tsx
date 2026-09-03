@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import PhotoCameraIcon from "@mui/icons-material/PhotoCamera";
@@ -8,7 +8,10 @@ import {
   Button,
   Card,
   CardContent,
+  Checkbox,
+  Chip,
   FormControl,
+  FormControlLabel,
   IconButton,
   InputAdornment,
   InputLabel,
@@ -18,17 +21,17 @@ import {
   Tab,
   Tabs,
   TextField,
-  ToggleButton,
-  ToggleButtonGroup,
   Typography,
 } from "@mui/material";
 
 import {
-  ORGANIZATION_ID,
   createTransaction,
+  getOrganizationId,
+  updateTransaction,
   uploadAttachment,
 } from "../api/client";
-import type { Account, Category, Scope, TransactionType } from "../api/client";
+import type { Account, Category, Scope, Tag, Transaction, TransactionType } from "../api/client";
+import { categoryLabel as formatCategoryPath, flattenCategoryTree } from "../utils/categories";
 import { formatWon, parseWon, todayIsoDate } from "../utils/money";
 
 interface SplitRow {
@@ -41,7 +44,11 @@ interface SplitRow {
 interface TransactionFormProps {
   accounts: Account[];
   categories: Category[];
+  tags: Tag[];
   onSaved: () => Promise<void>;
+  editing?: Transaction | null;
+  onCancel?: () => void;
+  embedded?: boolean;
 }
 
 function newSplitRow(scope: "PERSONAL" | "BUSINESS" = "BUSINESS"): SplitRow {
@@ -53,9 +60,18 @@ function newSplitRow(scope: "PERSONAL" | "BUSINESS" = "BUSINESS"): SplitRow {
   };
 }
 
-export function TransactionForm({ accounts, categories, onSaved }: TransactionFormProps) {
+export function TransactionForm({
+  accounts,
+  categories,
+  tags,
+  onSaved,
+  editing = null,
+  onCancel,
+  embedded = false,
+}: TransactionFormProps) {
   const [tab, setTab] = useState<TransactionType>("EXPENSE");
-  const [scope, setScope] = useState<Scope>("PERSONAL");
+  const [business, setBusiness] = useState<boolean>(false);
+  const [split, setSplit] = useState<boolean>(false);
   const [occurredOn, setOccurredOn] = useState<string>(todayIsoDate());
   const [amountText, setAmountText] = useState<string>("");
   const [paymentAccountId, setPaymentAccountId] = useState<string>("");
@@ -64,17 +80,51 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
   const [memo, setMemo] = useState<string>("");
   const [splits, setSplits] = useState<SplitRow[]>([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
   const [files, setFiles] = useState<File[]>([]);
+  const [selectedTagIds, setSelectedTagIds] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isEditing = editing != null;
+
+  useEffect(() => {
+    if (editing == null) {
+      return;
+    }
+    setTab(editing.transaction_type);
+    setBusiness(editing.scope === "BUSINESS");
+    setSplit(editing.scope === "MIXED");
+    setOccurredOn(editing.occurred_on);
+    setAmountText(formatWon(editing.amount));
+    setPaymentAccountId(String(editing.payment_account_id));
+    setTransferAccountId(editing.transfer_account_id == null ? "" : String(editing.transfer_account_id));
+    setMemo(editing.memo ?? "");
+    setSelectedTagIds((editing.tags ?? []).map((tag) => tag.id));
+    setFiles([]);
+    setError(null);
+    setSuccess(null);
+    if (editing.scope === "MIXED") {
+      setCategoryId("");
+      setSplits(
+        editing.items.map((item) => ({
+          key: String(item.id),
+          amount: formatWon(item.amount),
+          categoryId: item.category_id == null ? "" : String(item.category_id),
+          scope: item.scope === "BUSINESS" ? "BUSINESS" : "PERSONAL",
+        })),
+      );
+      return;
+    }
+    const first = editing.items[0];
+    setCategoryId(first?.category_id == null ? "" : String(first.category_id));
+  }, [editing]);
 
   const paymentAccounts = useMemo(
     () => accounts.filter((account) => account.is_payment_method && account.is_active),
     [accounts],
   );
   const typeCategories = useMemo(
-    () => categories.filter((category) => category.transaction_type === tab && category.is_active),
+    () => flattenCategoryTree(categories.filter((category) => category.transaction_type === tab && category.is_active)),
     [categories, tab],
   );
 
@@ -82,7 +132,7 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
   const splitTotal = splits.reduce((sum, row) => sum + parseWon(row.amount), 0);
   const paymentLabel =
     tab === "INCOME" ? "어느 계좌로 들어왔나요?" : tab === "TRANSFER" ? "어디서 보냈나요?" : "어떻게 냈나요?";
-  const categoryLabel = tab === "INCOME" ? "어떤 수입인가요?" : "어디에 사용했나요?";
+  const categoryFieldLabel = tab === "INCOME" ? "어떤 수입인가요?" : "어디에 사용했나요?";
 
   const namedValue = (selected: string, names: Array<{ id: number; name: string }>): string => {
     if (selected === "") {
@@ -95,9 +145,14 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
     setAmountText("");
     setMemo("");
     setFiles([]);
+    setSelectedTagIds([]);
+    setBusiness(false);
+    setSplit(false);
     setSplits([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
     setError(null);
   };
+
+  const scope: Scope = split ? "MIXED" : business ? "BUSINESS" : "PERSONAL";
 
   const handleSubmit = async (): Promise<void> => {
     setError(null);
@@ -163,25 +218,40 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
                 },
               ];
 
-      const saved = await createTransaction({
-        organization_id: ORGANIZATION_ID,
+      const payload = {
         occurred_on: occurredOn,
         transaction_type: tab,
-        scope: tab === "TRANSFER" ? scope === "MIXED" ? "PERSONAL" : scope : scope,
+        scope: tab === "TRANSFER" ? (scope === "MIXED" ? "PERSONAL" : scope) : scope,
         amount,
         memo: memo.trim() === "" ? null : memo.trim(),
         payment_account_id: Number(paymentAccountId),
         transfer_account_id: tab === "TRANSFER" ? Number(transferAccountId) : null,
         items,
-      });
+        tag_ids: selectedTagIds,
+      };
+
+      const saved =
+        editing == null
+          ? await createTransaction({
+              organization_id: getOrganizationId(),
+              ...payload,
+            })
+          : await updateTransaction(editing.id, payload);
 
       for (const file of files) {
         await uploadAttachment(saved.id, file);
       }
 
-      resetForm();
-      setSuccess("저장했어요.");
+      if (editing == null) {
+        resetForm();
+        setSuccess("저장했어요.");
+      } else {
+        setSuccess("수정했어요.");
+      }
       await onSaved();
+      if (editing != null) {
+        onCancel?.();
+      }
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : "저장하지 못했어요.");
     } finally {
@@ -189,16 +259,16 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
     }
   };
 
-  return (
-    <Card>
-      <CardContent sx={{ p: { xs: 2.5, sm: 3.5 } }}>
+  const formBody = (
         <Stack spacing={2.5}>
           <Box>
             <Typography variant="h5" sx={{ fontWeight: 800 }}>
-              오늘 돈 기록을 남겨요
+              {isEditing ? "이 기록을 수정해요" : "오늘 돈 기록을 남겨요"}
             </Typography>
             <Typography color="text.secondary" sx={{ mt: 0.5 }}>
-              회계 용어 없이, 가계부처럼 입력하면 됩니다.
+              {isEditing
+                ? "금액과 분류를 바꾸면 장부에 맞게 다시 반영돼요."
+                : "회계 용어 없이, 가계부처럼 입력하면 됩니다."}
             </Typography>
           </Box>
 
@@ -207,8 +277,8 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
             onChange={(_event, value: TransactionType) => {
               setTab(value);
               setCategoryId("");
-              if (value === "TRANSFER" && scope === "MIXED") {
-                setScope("PERSONAL");
+              if (value === "TRANSFER") {
+                setSplit(false);
               }
             }}
             variant="fullWidth"
@@ -230,26 +300,6 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
             <Tab value="INCOME" label="돈이 들어왔어요(수입)" />
             <Tab value="TRANSFER" label="계좌이체" />
           </Tabs>
-
-          {tab !== "TRANSFER" && (
-            <Box>
-              <Typography sx={{ fontWeight: 700, mb: 1 }}>개인인가요, 사업인가요?</Typography>
-              <ToggleButtonGroup
-                exclusive
-                fullWidth
-                value={scope}
-                onChange={(_event, value: Scope | null) => {
-                  if (value !== null) {
-                    setScope(value);
-                  }
-                }}
-              >
-                <ToggleButton value="PERSONAL">개인</ToggleButton>
-                <ToggleButton value="BUSINESS">사업</ToggleButton>
-                <ToggleButton value="MIXED">혼합(분할)</ToggleButton>
-              </ToggleButtonGroup>
-            </Box>
-          )}
 
           <TextField
             label="언제인가요?"
@@ -316,20 +366,30 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
 
           {tab !== "TRANSFER" && scope !== "MIXED" && (
             <FormControl>
-              <InputLabel shrink>{categoryLabel}</InputLabel>
+              <InputLabel shrink>{categoryFieldLabel}</InputLabel>
               <Select
                 notched
-                label={categoryLabel}
+                label={categoryFieldLabel}
                 value={categoryId}
                 displayEmpty
-                renderValue={(selected) => namedValue(String(selected), typeCategories)}
-                onChange={(event) => setCategoryId(String(event.target.value))}
-              >
-                {typeCategories.map((category) => (
-                  <MenuItem key={category.id} value={String(category.id)}>
-                    {category.name}
-                  </MenuItem>
-                ))}
+              renderValue={(selected) => {
+                const chosen = typeCategories.find((item) => String(item.id) === String(selected));
+                return chosen === undefined ? "선택하세요" : formatCategoryPath(chosen, typeCategories);
+              }}
+              onChange={(event) => {
+                const nextId = String(event.target.value);
+                setCategoryId(nextId);
+                const chosen = typeCategories.find((item) => String(item.id) === nextId);
+                if (chosen !== undefined && chosen.default_scope !== "COMMON" && !split) {
+                  setBusiness(chosen.default_scope === "BUSINESS");
+                }
+              }}
+            >
+              {typeCategories.map((category) => (
+                <MenuItem key={category.id} value={String(category.id)} sx={{ pl: category.parent_id === null ? 2 : 4 }}>
+                  {formatCategoryPath(category, typeCategories)}
+                </MenuItem>
+              ))}
               </Select>
             </FormControl>
           )}
@@ -357,36 +417,44 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
                       label="분류"
                       value={row.categoryId}
                       displayEmpty
-                      renderValue={(selected) => namedValue(String(selected), typeCategories)}
+                      renderValue={(selected) => {
+                        const chosen = typeCategories.find((item) => String(item.id) === String(selected));
+                        return chosen === undefined ? "선택하세요" : formatCategoryPath(chosen, typeCategories);
+                      }}
                       onChange={(event) => {
+                        const nextId = String(event.target.value);
+                        const chosen = typeCategories.find((item) => String(item.id) === nextId);
                         const next = [...splits];
-                        next[index] = { ...row, categoryId: String(event.target.value) };
+                        next[index] = {
+                          ...row,
+                          categoryId: nextId,
+                          scope:
+                            chosen !== undefined && chosen.default_scope !== "COMMON" ? chosen.default_scope : row.scope,
+                        };
                         setSplits(next);
                       }}
                     >
                       {typeCategories.map((category) => (
-                        <MenuItem key={category.id} value={String(category.id)}>
-                          {category.name}
+                        <MenuItem key={category.id} value={String(category.id)} sx={{ pl: category.parent_id === null ? 2 : 4 }}>
+                          {formatCategoryPath(category, typeCategories)}
                         </MenuItem>
                       ))}
                     </Select>
                   </FormControl>
-                  <ToggleButtonGroup
-                    exclusive
-                    value={row.scope}
-                    onChange={(_event, value: "PERSONAL" | "BUSINESS" | null) => {
-                      if (value === null) {
-                        return;
-                      }
-                      const next = [...splits];
-                      next[index] = { ...row, scope: value };
-                      setSplits(next);
-                    }}
-                    sx={{ minWidth: { sm: 160 } }}
-                  >
-                    <ToggleButton value="PERSONAL">개인</ToggleButton>
-                    <ToggleButton value="BUSINESS">사업</ToggleButton>
-                  </ToggleButtonGroup>
+                  <FormControlLabel
+                    sx={{ minWidth: { sm: 120 }, ml: { sm: 0.5 } }}
+                    control={
+                      <Checkbox
+                        checked={row.scope === "BUSINESS"}
+                        onChange={(event) => {
+                          const next = [...splits];
+                          next[index] = { ...row, scope: event.target.checked ? "BUSINESS" : "PERSONAL" };
+                          setSplits(next);
+                        }}
+                      />
+                    }
+                    label="회사"
+                  />
                   {splits.length > 2 && (
                     <IconButton
                       aria-label="항목 삭제"
@@ -416,6 +484,49 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
             onChange={(event) => setMemo(event.target.value)}
             placeholder="예: 프린터 용지"
           />
+
+          {tab !== "TRANSFER" && (
+            <Stack direction="row" spacing={2} alignItems="center">
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={business && !split}
+                    disabled={split}
+                    onChange={(event) => setBusiness(event.target.checked)}
+                  />
+                }
+                label="회사"
+              />
+              <FormControlLabel
+                control={<Checkbox checked={split} onChange={(event) => setSplit(event.target.checked)} />}
+                label="둘다"
+              />
+            </Stack>
+          )}
+
+          {tags.length > 0 && (
+            <Box>
+              <Typography sx={{ fontWeight: 700, mb: 1 }}>태그 (선택)</Typography>
+              <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
+                {tags.map((tag) => {
+                  const selected = selectedTagIds.includes(tag.id);
+                  return (
+                    <Chip
+                      key={tag.id}
+                      label={`#${tag.name}`}
+                      color={selected ? "primary" : "default"}
+                      variant={selected ? "filled" : "outlined"}
+                      onClick={() => {
+                        setSelectedTagIds((current) =>
+                          current.includes(tag.id) ? current.filter((id) => id !== tag.id) : [...current, tag.id],
+                        );
+                      }}
+                    />
+                  );
+                })}
+              </Stack>
+            </Box>
+          )}
 
           <Box>
             <input
@@ -459,11 +570,31 @@ export function TransactionForm({ accounts, categories, onSaved }: TransactionFo
           {error !== null && <Alert severity="error">{error}</Alert>}
           {success !== null && <Alert severity="success">{success}</Alert>}
 
-          <Button variant="contained" size="large" disabled={submitting} onClick={() => void handleSubmit()}>
-            {submitting ? "저장하는 중…" : "저장하기"}
-          </Button>
+          <Stack direction="row" spacing={1.5}>
+            {onCancel != null && (
+              <Button variant="outlined" size="large" onClick={onCancel} sx={{ flex: 1 }}>
+                닫기
+              </Button>
+            )}
+            <Button
+              variant="contained"
+              size="large"
+              disabled={submitting}
+              onClick={() => void handleSubmit()}
+              sx={{ flex: 1 }}
+            >
+              {submitting ? "저장하는 중…" : isEditing ? "수정하기" : "저장하기"}
+            </Button>
+          </Stack>
         </Stack>
-      </CardContent>
+  );
+
+  if (embedded) {
+    return formBody;
+  }
+  return (
+    <Card>
+      <CardContent sx={{ p: { xs: 2.5, sm: 3.5 } }}>{formBody}</CardContent>
     </Card>
   );
 }

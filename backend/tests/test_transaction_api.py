@@ -1,26 +1,10 @@
-from collections.abc import Generator
-
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
 from app.db.init_db import seed_standard_data
-from app.main import app
 from app.models import Account, Category, Organization
 from app.models.enums import Scope, TransactionType
-
-
-@pytest.fixture()
-def client(db_session: Session) -> Generator[TestClient, None, None]:
-    def override_get_db() -> Generator[Session, None, None]:
-        yield db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
 
 
 def _seed(db_session: Session) -> tuple[Organization, dict[str, Account], dict[str, Category]]:
@@ -45,7 +29,7 @@ def test_create_and_list_expense_transaction(client: TestClient, db_session: Ses
             "payment_account_id": accounts["2100"].id,
             "items": [
                 {
-                    "category_id": categories["사무용품"].id,
+                    "category_id": categories["관리비"].id,
                     "amount": 50_000,
                     "scope": Scope.BUSINESS.value,
                     "line_no": 1,
@@ -81,7 +65,7 @@ def test_update_transaction_reverses_and_reposts(client: TestClient, db_session:
             "amount": 50_000,
             "payment_account_id": accounts["2100"].id,
             "items": [
-                {"category_id": categories["사무용품"].id, "amount": 50_000, "scope": "BUSINESS", "line_no": 1}
+                {"category_id": categories["관리비"].id, "amount": 50_000, "scope": "BUSINESS", "line_no": 1}
             ],
         },
     ).json()
@@ -95,7 +79,7 @@ def test_update_transaction_reverses_and_reposts(client: TestClient, db_session:
             "amount": 55_000,
             "payment_account_id": accounts["2100"].id,
             "items": [
-                {"category_id": categories["사무용품"].id, "amount": 55_000, "scope": "BUSINESS", "line_no": 1}
+                {"category_id": categories["관리비"].id, "amount": 55_000, "scope": "BUSINESS", "line_no": 1}
             ],
         },
     )
@@ -104,8 +88,8 @@ def test_update_transaction_reverses_and_reposts(client: TestClient, db_session:
 
     trial = client.get(f"/api/reports/trial-balance?organization_id={organization.id}").json()
     assert trial["is_balanced"] is True
-    supplies = next(row for row in trial["rows"] if row["account_code"] == "5100")
-    assert supplies["debit_total"] == 55_000
+    housing = next(row for row in trial["rows"] if row["account_code"] == "5800")
+    assert housing["debit_total"] == 55_000
 
 
 def test_delete_cancels_transaction(client: TestClient, db_session: Session) -> None:
@@ -120,7 +104,7 @@ def test_delete_cancels_transaction(client: TestClient, db_session: Session) -> 
             "amount": 50_000,
             "payment_account_id": accounts["2100"].id,
             "items": [
-                {"category_id": categories["사무용품"].id, "amount": 50_000, "scope": "BUSINESS", "line_no": 1}
+                {"category_id": categories["관리비"].id, "amount": 50_000, "scope": "BUSINESS", "line_no": 1}
             ],
         },
     ).json()

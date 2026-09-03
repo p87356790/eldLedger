@@ -14,6 +14,8 @@ from app.schemas.accounting import (
     TransactionRead,
     TransactionUpdate,
 )
+from app.security.deps import get_current_user
+from app.models import User
 from app.services.accounting_service import AccountingError
 from app.services.transaction_service import TransactionService
 
@@ -27,26 +29,29 @@ def _service(db: Session = Depends(get_db)) -> TransactionService:
 @router.get("/accounts", response_model=list[AccountRead])
 def list_accounts(
     organization_id: int = Query(..., ge=1),
+    user: User = Depends(get_current_user),
     service: TransactionService = Depends(_service),
 ) -> list[AccountRead]:
-    return [AccountRead.model_validate(account) for account in service.list_accounts(organization_id)]
+    return [AccountRead.model_validate(account) for account in service.list_accounts(organization_id, owner_user_id=user.id)]
 
 
 @router.get("/categories", response_model=list[CategoryRead])
 def list_categories(
     organization_id: int = Query(..., ge=1),
+    user: User = Depends(get_current_user),
     service: TransactionService = Depends(_service),
 ) -> list[CategoryRead]:
-    return [CategoryRead.model_validate(category) for category in service.list_categories(organization_id)]
+    return [CategoryRead.model_validate(category) for category in service.list_categories(organization_id, owner_user_id=user.id)]
 
 
 @router.post("/transactions", response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
 def create_transaction(
     payload: TransactionCreate,
     service: TransactionService = Depends(_service),
+    user: User = Depends(get_current_user),
 ) -> TransactionRead:
     try:
-        transaction = service.create(payload)
+        transaction = service.create(payload, created_by_user_id=user.id)
     except LookupError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     except AccountingError as error:
@@ -70,6 +75,7 @@ def list_transactions(
     include_reversed: bool = False,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
+    user: User = Depends(get_current_user),
     service: TransactionService = Depends(_service),
 ) -> TransactionListResponse:
     total, rows = service.list_transactions(
@@ -84,6 +90,7 @@ def list_transactions(
         category_id=category_id,
         tag_id=tag_id,
         memo=memo,
+        created_by_user_id=user.id,
         include_reversed=include_reversed,
         offset=offset,
         limit=limit,

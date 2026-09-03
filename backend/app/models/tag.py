@@ -7,16 +7,22 @@ from app.models.enums import IntPKMixin, TimestampMixin
 
 class Tag(IntPKMixin, TimestampMixin, Base):
     __tablename__ = "tags"
-    __table_args__ = (UniqueConstraint("organization_id", "name"),)
+    __table_args__ = (UniqueConstraint("organization_id", "owner_user_id", "name"),)
 
     organization_id: Mapped[int] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(50), nullable=False)
 
     organization: Mapped["Organization"] = relationship("Organization", back_populates="tags")
+    owner: Mapped["User | None"] = relationship("User", foreign_keys=[owner_user_id])
     transaction_tags: Mapped[list["TransactionTag"]] = relationship(
         "TransactionTag",
         back_populates="tag",

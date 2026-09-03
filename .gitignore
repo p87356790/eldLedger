@@ -47,3 +47,7 @@ Thumbs.db
 
 # Docker
 .docker/
+
+# Release bundles (images / zip)
+release/*.tar
+release/*.zip

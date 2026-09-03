@@ -17,7 +17,7 @@ class TransactionRepository:
             select(Transaction)
             .options(
                 selectinload(Transaction.items),
-                selectinload(Transaction.transaction_tags),
+                selectinload(Transaction.transaction_tags).selectinload(TransactionTag.tag),
                 selectinload(Transaction.attachments),
             )
             .where(Transaction.id == transaction_id)
@@ -37,13 +37,18 @@ class TransactionRepository:
         category_id: int | None = None,
         tag_id: int | None = None,
         memo: str | None = None,
+        created_by_user_id: int | None = None,
         include_reversed: bool = False,
         offset: int = 0,
         limit: int = 100,
     ) -> tuple[int, Sequence[Transaction]]:
         stmt = (
             select(Transaction)
-            .options(selectinload(Transaction.items), selectinload(Transaction.attachments))
+            .options(
+                selectinload(Transaction.items),
+                selectinload(Transaction.transaction_tags).selectinload(TransactionTag.tag),
+                selectinload(Transaction.attachments),
+            )
             .where(Transaction.organization_id == organization_id)
         )
         stmt = self._apply_filters(
@@ -58,6 +63,7 @@ class TransactionRepository:
             category_id=category_id,
             tag_id=tag_id,
             memo=memo,
+            created_by_user_id=created_by_user_id,
             include_reversed=include_reversed,
         )
         count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
@@ -68,6 +74,41 @@ class TransactionRepository:
             .limit(limit)
         ).all()
         return total, rows
+
+    def list_for_dashboard(
+        self,
+        *,
+        organization_id: int,
+        created_by_user_id: int,
+        date_from: date,
+        date_to: date,
+        account_id: int | None = None,
+    ) -> Sequence[Transaction]:
+        stmt = (
+            select(Transaction)
+            .options(
+                selectinload(Transaction.items).selectinload(TransactionItem.category),
+                selectinload(Transaction.payment_account),
+                selectinload(Transaction.transfer_account),
+                selectinload(Transaction.attachments),
+            )
+            .where(Transaction.organization_id == organization_id)
+            .where(Transaction.created_by_user_id == created_by_user_id)
+            .where(Transaction.status != RecordStatus.REVERSED)
+            .where(Transaction.occurred_on >= date_from)
+            .where(Transaction.occurred_on <= date_to)
+        )
+        if account_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Transaction.payment_account_id == account_id,
+                    Transaction.transfer_account_id == account_id,
+                )
+            )
+        return self._session.scalars(
+            stmt.order_by(Transaction.occurred_on.desc(), Transaction.id.desc())
+        ).all()
+
 
     def _apply_filters(
         self,
@@ -83,6 +124,7 @@ class TransactionRepository:
         category_id: int | None,
         tag_id: int | None,
         memo: str | None,
+        created_by_user_id: int | None,
         include_reversed: bool,
     ) -> Select[tuple[Transaction]]:
         if not include_reversed:
@@ -108,6 +150,8 @@ class TransactionRepository:
             )
         if memo:
             stmt = stmt.where(Transaction.memo.ilike(f"%{memo}%"))
+        if created_by_user_id is not None:
+            stmt = stmt.where(Transaction.created_by_user_id == created_by_user_id)
         if category_id is not None:
             stmt = stmt.join(Transaction.items).where(TransactionItem.category_id == category_id).distinct()
         if tag_id is not None:

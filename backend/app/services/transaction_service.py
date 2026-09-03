@@ -2,8 +2,8 @@ from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Account, Attachment, Category, Organization, Transaction, TransactionItem, TransactionTag
@@ -30,10 +30,11 @@ class TransactionService:
         self._repo = TransactionRepository(session)
         self._accounting = AccountingService(session)
 
-    def create(self, payload: TransactionCreate) -> Transaction:
+    def create(self, payload: TransactionCreate, *, created_by_user_id: int | None = None) -> Transaction:
         self._require_organization(payload.organization_id)
         transaction = Transaction(
             organization_id=payload.organization_id,
+            created_by_user_id=created_by_user_id,
             occurred_on=payload.occurred_on,
             transaction_type=payload.transaction_type,
             scope=payload.scope,
@@ -44,7 +45,7 @@ class TransactionService:
             items=[_item_from_payload(item) for item in payload.items],
         )
         self._accounting.post_transaction(transaction)
-        self._replace_tags(transaction, payload.tag_ids)
+        self.replace_tags(transaction, payload.tag_ids)
         self._session.flush()
         loaded = self._repo.get(transaction.id) if transaction.id is not None else None
         if loaded is None:
@@ -71,6 +72,7 @@ class TransactionService:
         category_id: int | None = None,
         tag_id: int | None = None,
         memo: str | None = None,
+        created_by_user_id: int | None = None,
         include_reversed: bool = False,
         offset: int = 0,
         limit: int = 100,
@@ -87,6 +89,7 @@ class TransactionService:
             category_id=category_id,
             tag_id=tag_id,
             memo=memo,
+            created_by_user_id=created_by_user_id,
             include_reversed=include_reversed,
             offset=offset,
             limit=limit,
@@ -107,7 +110,7 @@ class TransactionService:
         transaction.items.clear()
         for item in payload.items:
             transaction.items.append(_item_from_payload(item))
-        self._replace_tags(transaction, payload.tag_ids)
+        self.replace_tags(transaction, payload.tag_ids)
         self._session.flush()
         self._accounting.correct_transaction(transaction)
         loaded = self._repo.get(transaction_id)
@@ -120,24 +123,21 @@ class TransactionService:
         self._accounting.cancel_transaction(transaction)
         return transaction
 
-    def list_accounts(self, organization_id: int) -> list[Account]:
-        return list(
-            self._session.scalars(
-                select(Account)
-                .where(Account.organization_id == organization_id, Account.is_active.is_(True))
-                .order_by(Account.sort_order, Account.code)
+    def list_accounts(self, organization_id: int, *, owner_user_id: int | None = None) -> list[Account]:
+        stmt = select(Account).where(Account.organization_id == organization_id, Account.is_active.is_(True))
+        if owner_user_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Account.owner_user_id == owner_user_id,
+                    Account.owner_user_id.is_(None) & Account.instrument_kind.is_(None),
+                )
             )
-        )
+        return list(self._session.scalars(stmt.order_by(Account.sort_order, Account.code)))
 
-    def list_categories(self, organization_id: int) -> list[Category]:
-        return list(
-            self._session.scalars(
-                select(Category)
-                .options(selectinload(Category.account))
-                .where(Category.organization_id == organization_id, Category.is_active.is_(True))
-                .order_by(Category.sort_order, Category.name)
-            )
-        )
+    def list_categories(self, organization_id: int, *, owner_user_id: int | None = None) -> list[Category]:
+        from app.repositories.category_repository import CategoryRepository
+
+        return CategoryRepository(self._session).list_categories(organization_id, owner_user_id=owner_user_id)
 
     def add_attachment(
         self,
@@ -174,9 +174,10 @@ class TransactionService:
         )
         self._session.add(attachment)
         self._session.flush()
+        self._session.expire(transaction, ["attachments"])
         return attachment
 
-    def _replace_tags(self, transaction: Transaction, tag_ids: list[int]) -> None:
+    def replace_tags(self, transaction: Transaction, tag_ids: list[int]) -> None:
         transaction.transaction_tags.clear()
         for tag_id in tag_ids:
             transaction.transaction_tags.append(TransactionTag(tag_id=tag_id))

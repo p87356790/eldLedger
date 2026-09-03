@@ -54,13 +54,13 @@ def test_trial_balance_and_ledgers_use_journal_lines(db_session: Session) -> Non
         payment_id=accounts["2100"].id,
         items=[
             TransactionItem(
-                category_id=categories["사무용품"].id,
+                category_id=categories["관리비"].id,
                 amount=50_000,
                 scope=Scope.BUSINESS,
                 line_no=1,
             )
         ],
-        memo="프린터 용지",
+        memo="관리비 결제",
     )
     ledger = LedgerService(db_session)
     trial = ledger.trial_balance(organization_id=organization.id)
@@ -69,13 +69,13 @@ def test_trial_balance_and_ledgers_use_journal_lines(db_session: Session) -> Non
 
     book = ledger.transaction_ledger(organization_id=organization.id)
     assert {(row.account_code, row.debit_amount, row.credit_amount) for row in book} == {
-        ("5100", 50_000, 0),
+        ("5800", 50_000, 0),
         ("2100", 0, 50_000),
     }
 
-    supplies = ledger.account_ledgers(organization_id=organization.id, account_id=accounts["5100"].id)[0]
-    assert supplies.lines[-1].balance == 50_000
-    assert supplies.closing_balance == 50_000
+    housing = ledger.account_ledgers(organization_id=organization.id, account_id=accounts["5800"].id)[0]
+    assert housing.lines[-1].balance == 50_000
+    assert housing.closing_balance == 50_000
 
 
 def test_business_filter_excludes_personal_and_keeps_balance(db_session: Session) -> None:
@@ -87,9 +87,9 @@ def test_business_filter_excludes_personal_and_keeps_balance(db_session: Session
         scope=Scope.BUSINESS,
         payment_id=accounts["2100"].id,
         items=[
-            TransactionItem(category_id=categories["사무용품"].id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
+            TransactionItem(category_id=categories["관리비"].id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
         ],
-        memo="사업 사무용품",
+        memo="사업 관리비",
     )
     _post_expense(
         db_session,
@@ -138,9 +138,9 @@ def test_business_excel_contains_expected_sheets_and_filters_personal(db_session
         scope=Scope.BUSINESS,
         payment_id=accounts["2100"].id,
         items=[
-            TransactionItem(category_id=categories["사무용품"].id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
+            TransactionItem(category_id=categories["관리비"].id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
         ],
-        memo="사업 사무용품",
+        memo="사업 관리비",
     )
     _post_expense(
         db_session,

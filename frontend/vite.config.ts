@@ -8,7 +8,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        // Windows resolves localhost to ::1 first; that hits a stale WSL relay, not uvicorn.
+        target: "http://127.0.0.1:8000",
         changeOrigin: true,
       },
     },

@@ -38,8 +38,8 @@ def test_card_expense_50000_creates_balanced_journal(db_session: Session) -> Non
     organization = seed_standard_data(db_session)
     db_session.flush()
     payable = _account(db_session, "2100")
-    supplies = _account(db_session, "5100")
-    office = _category(db_session, "사무용품")
+    housing = _account(db_session, "5800")
+    rent = _category(db_session, "관리비")
 
     transaction = Transaction(
         organization_id=organization.id,
@@ -47,11 +47,11 @@ def test_card_expense_50000_creates_balanced_journal(db_session: Session) -> Non
         transaction_type=TransactionType.EXPENSE,
         scope=Scope.BUSINESS,
         amount=50_000,
-        memo="프린터 용지",
+        memo="관리비 결제",
         payment_account_id=payable.id,
         items=[
             TransactionItem(
-                category_id=office.id,
+                category_id=rent.id,
                 amount=50_000,
                 scope=Scope.BUSINESS,
                 line_no=1,
@@ -65,8 +65,8 @@ def test_card_expense_50000_creates_balanced_journal(db_session: Session) -> Non
     assert transaction.status == RecordStatus.CONFIRMED
     assert entry.transaction_id == transaction.id
     assert debit_total == credit_total == 50_000
-    assert _line_for_account(entry, supplies.id).debit_amount == 50_000
-    assert _line_for_account(entry, supplies.id).credit_amount == 0
+    assert _line_for_account(entry, housing.id).debit_amount == 50_000
+    assert _line_for_account(entry, housing.id).credit_amount == 0
     assert _line_for_account(entry, payable.id).debit_amount == 0
     assert _line_for_account(entry, payable.id).credit_amount == 50_000
 
@@ -119,7 +119,7 @@ def test_income_posts_bank_debit_and_revenue_credit(db_session: Session) -> None
     db_session.flush()
     bank = _account(db_session, "1200")
     sales = _account(db_session, "4100")
-    sales_category = _category(db_session, "사업매출")
+    sales_category = _category(db_session, "매출")
 
     transaction = Transaction(
         organization_id=organization.id,
@@ -172,8 +172,8 @@ def test_correct_confirmed_transaction_reverses_then_reposts(db_session: Session
     organization = seed_standard_data(db_session)
     db_session.flush()
     payable = _account(db_session, "2100")
-    supplies = _account(db_session, "5100")
-    office = _category(db_session, "사무용품")
+    housing = _account(db_session, "5800")
+    rent = _category(db_session, "관리비")
     service = AccountingService(db_session)
 
     transaction = Transaction(
@@ -184,7 +184,7 @@ def test_correct_confirmed_transaction_reverses_then_reposts(db_session: Session
         amount=50_000,
         payment_account_id=payable.id,
         items=[
-            TransactionItem(category_id=office.id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
+            TransactionItem(category_id=rent.id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
         ],
     )
     original = service.post_transaction(transaction)
@@ -202,11 +202,11 @@ def test_correct_confirmed_transaction_reverses_then_reposts(db_session: Session
 
     assert original.status == RecordStatus.REVERSED
     assert reversal.status == RecordStatus.CONFIRMED
-    assert _line_for_account(reversal, supplies.id).credit_amount == 50_000
+    assert _line_for_account(reversal, housing.id).credit_amount == 50_000
     assert _line_for_account(reversal, payable.id).debit_amount == 50_000
     assert _debit_credit_totals(reversal) == (50_000, 50_000)
     assert _debit_credit_totals(replacement) == (55_000, 55_000)
-    assert _line_for_account(replacement, supplies.id).debit_amount == 55_000
+    assert _line_for_account(replacement, housing.id).debit_amount == 55_000
     assert transaction.status == RecordStatus.CONFIRMED
     assert replacement.id != original_id
 
@@ -215,7 +215,7 @@ def test_repost_without_reversal_is_rejected(db_session: Session) -> None:
     organization = seed_standard_data(db_session)
     db_session.flush()
     payable = _account(db_session, "2100")
-    office = _category(db_session, "사무용품")
+    rent = _category(db_session, "관리비")
     service = AccountingService(db_session)
 
     transaction = Transaction(
@@ -226,7 +226,7 @@ def test_repost_without_reversal_is_rejected(db_session: Session) -> None:
         amount=50_000,
         payment_account_id=payable.id,
         items=[
-            TransactionItem(category_id=office.id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
+            TransactionItem(category_id=rent.id, amount=50_000, scope=Scope.BUSINESS, line_no=1)
         ],
     )
     service.post_transaction(transaction)

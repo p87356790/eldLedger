@@ -27,8 +27,8 @@ def test_office_supply_example_persists_balanced_journal(db_session: Session) ->
     db_session.flush()
 
     payable = _account(db_session, "2100")
-    supplies = _account(db_session, "5100")
-    category = next(c for c in organization.categories if c.name == "사무용품")
+    housing = _account(db_session, "5800")
+    category = next(c for c in organization.categories if c.name == "관리비")
 
     transaction = Transaction(
         organization_id=organization.id,
@@ -36,13 +36,13 @@ def test_office_supply_example_persists_balanced_journal(db_session: Session) ->
         transaction_type=TransactionType.EXPENSE,
         scope=Scope.BUSINESS,
         amount=50_000,
-        memo="프린터 용지",
+        memo="관리비 결제",
         status=RecordStatus.CONFIRMED,
         payment_account_id=payable.id,
         items=[
             TransactionItem(
                 category_id=category.id,
-                account_id=supplies.id,
+                account_id=housing.id,
                 amount=50_000,
                 scope=Scope.BUSINESS,
                 line_no=1,
@@ -52,11 +52,11 @@ def test_office_supply_example_persists_balanced_journal(db_session: Session) ->
     entry = JournalEntry(
         organization_id=organization.id,
         occurred_on=date(2026, 9, 1),
-        description="국민카드로 사무용품 50,000원",
+        description="국민카드로 관리비 50,000원",
         status=RecordStatus.CONFIRMED,
         transaction=transaction,
         lines=[
-            JournalLine(account_id=supplies.id, debit_amount=50_000, credit_amount=0, line_no=1),
+            JournalLine(account_id=housing.id, debit_amount=50_000, credit_amount=0, line_no=1),
             JournalLine(account_id=payable.id, debit_amount=0, credit_amount=50_000, line_no=2),
         ],
     )
