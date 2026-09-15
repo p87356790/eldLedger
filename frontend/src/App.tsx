@@ -15,6 +15,8 @@ import {
 } from "./api/client";
 import type { Account, AuthUser, Category, Tag, Transaction, WalletAccount } from "./api/client";
 import { clearSession, getAccessToken, onSessionExpired } from "./api/session";
+import { useIdleLogout } from "./hooks/useIdleLogout";
+import { clearLastActivity, markActivity, sessionIdleExpired } from "./utils/idle";
 import { AccountPage } from "./components/AccountPage";
 import { AccountsPage } from "./components/AccountsPage";
 import { AppHeader } from "./components/AppHeader";
@@ -54,16 +56,21 @@ function App() {
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState<boolean>(false);
+  const [idleLogout, setIdleLogout] = useState<boolean>(false);
 
   const enterApp = useCallback((user: AuthUser): void => {
+    markActivity();
+    setIdleLogout(false);
     setCurrentUser(user);
     setBoot("ready");
   }, []);
 
-  const handleLogout = useCallback(async (): Promise<void> => {
+  const handleLogout = useCallback(async (reason: "manual" | "idle" = "manual"): Promise<void> => {
     await logout();
+    clearLastActivity();
     clearSession();
     setCurrentUser(null);
+    setIdleLogout(reason === "idle");
     setBoot("login");
   }, []);
 
@@ -109,6 +116,15 @@ function App() {
           setBoot("login");
           return;
         }
+        if (sessionIdleExpired()) {
+          await logout();
+          clearLastActivity();
+          if (!cancelled) {
+            setIdleLogout(true);
+            setBoot("login");
+          }
+          return;
+        }
         const me = await fetchMe();
         if (!cancelled) {
           enterApp(me);
@@ -149,6 +165,10 @@ function App() {
     };
   }, [boot, refresh]);
 
+  useIdleLogout(boot === "ready", () => {
+    void handleLogout("idle");
+  });
+
   useEffect(() => {
     if (boot !== "ready" || currentUser?.role !== "ADMIN") {
       return;
@@ -169,7 +189,7 @@ function App() {
     return <SetupPage organizationName={setupOrgName} onReady={enterApp} />;
   }
   if (boot === "login" || currentUser === null) {
-    return <LoginPage onReady={enterApp} />;
+    return <LoginPage onReady={enterApp} idleLogout={idleLogout} />;
   }
 
   return (

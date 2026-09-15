@@ -6,9 +6,10 @@ import type { AuthUser } from "../api/client";
 
 interface LoginPageProps {
   onReady: (user: AuthUser) => void;
+  idleLogout?: boolean;
 }
 
-export function LoginPage({ onReady }: LoginPageProps) {
+export function LoginPage({ onReady, idleLogout = false }: LoginPageProps) {
   const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +41,9 @@ export function LoginPage({ onReady }: LoginPageProps) {
                 사용자명 또는 이메일로 로그인해 주세요.
               </Typography>
             </Box>
+            {idleLogout && (
+              <Alert severity="info">15분 동안 사용하지 않아 로그아웃했어요. 다시 로그인해 주세요.</Alert>
+            )}
             <TextField
               label="사용자명 또는 이메일"
               value={username}
