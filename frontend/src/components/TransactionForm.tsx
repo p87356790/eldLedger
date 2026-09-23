@@ -10,6 +10,10 @@ import {
   CardContent,
   Checkbox,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   FormControlLabel,
   IconButton,
@@ -25,14 +29,50 @@ import {
 } from "@mui/material";
 
 import {
+  checkDuplicateTransactions,
   createTransaction,
   getOrganizationId,
   updateTransaction,
   uploadAttachment,
 } from "../api/client";
-import type { Account, Category, Scope, Tag, Transaction, TransactionType } from "../api/client";
+import type { Account, Attachment, Category, Scope, Tag, Transaction, TransactionType } from "../api/client";
 import { categoryLabel as formatCategoryPath, flattenCategoryTree } from "../utils/categories";
-import { formatWon, parseWon, todayIsoDate } from "../utils/money";
+import { formatDisplayDate, formatWon, formatWonWithSymbol, parseWon, todayIsoDate } from "../utils/money";
+import { collectReceiptFiles } from "../utils/receipts";
+import { ReceiptGallery } from "./ReceiptGallery";
+import { ReceiptViewerDialog } from "./ReceiptViewerDialog";
+import type { ReceiptViewerTarget } from "./ReceiptViewerDialog";
+
+const EMPTY_ATTACHMENTS: Attachment[] = [];
+
+const TYPE_LABEL: Record<TransactionType, string> = {
+  EXPENSE: "지출",
+  INCOME: "수입",
+  TRANSFER: "이체",
+};
+
+function accountLabel(accounts: Account[], id: number | null): string {
+  if (id === null) {
+    return "";
+  }
+  return accounts.find((account) => account.id === id)?.name ?? "계좌";
+}
+
+function describeDuplicate(row: Transaction, accounts: Account[], categories: Category[]): string {
+  const date = formatDisplayDate(row.occurred_on);
+  const type = TYPE_LABEL[row.transaction_type];
+  const money = formatWonWithSymbol(row.amount);
+  if (row.transaction_type === "TRANSFER") {
+    return `${date} ${type} ${money} · ${accountLabel(accounts, row.payment_account_id)} → ${accountLabel(accounts, row.transfer_account_id)}`;
+  }
+  const merchant = row.merchant?.trim() ?? "";
+  const category = row.items
+    .map((item) => categories.find((entry) => entry.id === item.category_id)?.name ?? "")
+    .filter((name) => name !== "")
+    .join(" · ");
+  const extra = [merchant, category, accountLabel(accounts, row.payment_account_id)].filter((part) => part !== "");
+  return `${date} ${type} ${money}${extra.length > 0 ? ` · ${extra.join(" · ")}` : ""}`;
+}
 
 interface SplitRow {
   key: string;
@@ -78,14 +118,20 @@ export function TransactionForm({
   const [transferAccountId, setTransferAccountId] = useState<string>("");
   const [categoryId, setCategoryId] = useState<string>("");
   const [memo, setMemo] = useState<string>("");
+  const [merchant, setMerchant] = useState<string>("");
   const [splits, setSplits] = useState<SplitRow[]>([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
   const [files, setFiles] = useState<File[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [receiptTarget, setReceiptTarget] = useState<ReceiptViewerTarget | null>(null);
+  const [duplicateMatches, setDuplicateMatches] = useState<Transaction[]>([]);
+  const [dropActive, setDropActive] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dropDepthRef = useRef<number>(0);
   const isEditing = editing != null;
+  const savedAttachments = editing?.attachments ?? EMPTY_ATTACHMENTS;
 
   useEffect(() => {
     if (editing == null) {
@@ -99,10 +145,12 @@ export function TransactionForm({
     setPaymentAccountId(String(editing.payment_account_id));
     setTransferAccountId(editing.transfer_account_id == null ? "" : String(editing.transfer_account_id));
     setMemo(editing.memo ?? "");
+    setMerchant(editing.merchant ?? "");
     setSelectedTagIds((editing.tags ?? []).map((tag) => tag.id));
     setFiles([]);
     setError(null);
     setSuccess(null);
+    setDuplicateMatches([]);
     if (editing.scope === "MIXED") {
       setCategoryId("");
       setSplits(
@@ -144,17 +192,36 @@ export function TransactionForm({
   const resetForm = (): void => {
     setAmountText("");
     setMemo("");
+    setMerchant("");
     setFiles([]);
     setSelectedTagIds([]);
     setBusiness(false);
     setSplit(false);
     setSplits([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
     setError(null);
+    setDuplicateMatches([]);
+    setDropActive(false);
+    dropDepthRef.current = 0;
+  };
+
+  const addReceiptFiles = (incoming: FileList | File[]): void => {
+    const accepted = collectReceiptFiles(incoming);
+    if (accepted.length === 0) {
+      setError("영수증은 JPG, PNG, WEBP, HEIC, PDF만 올릴 수 있습니다.");
+      return;
+    }
+    setError(null);
+    setFiles((current) => [...current, ...accepted]);
+  };
+
+  const resetDropState = (): void => {
+    dropDepthRef.current = 0;
+    setDropActive(false);
   };
 
   const scope: Scope = split ? "MIXED" : business ? "BUSINESS" : "PERSONAL";
 
-  const handleSubmit = async (): Promise<void> => {
+  const handleSubmit = async (ignoreDuplicates: boolean = false): Promise<void> => {
     setError(null);
     setSuccess(null);
 
@@ -193,42 +260,62 @@ export function TransactionForm({
       }
     }
 
+    const items =
+      tab === "TRANSFER"
+        ? []
+        : scope === "MIXED"
+          ? splits.map((row, index) => ({
+              category_id: Number(row.categoryId),
+              account_id: null,
+              amount: parseWon(row.amount),
+              scope: row.scope,
+              memo: null,
+              line_no: index + 1,
+            }))
+          : [
+              {
+                category_id: Number(categoryId),
+                account_id: null,
+                amount,
+                scope,
+                memo: null,
+                line_no: 1,
+              },
+            ];
+
+    const payload = {
+      occurred_on: occurredOn,
+      transaction_type: tab,
+      scope: tab === "TRANSFER" ? (scope === "MIXED" ? "PERSONAL" : scope) : scope,
+      amount,
+      merchant: tab === "TRANSFER" || merchant.trim() === "" ? null : merchant.trim(),
+      memo: memo.trim() === "" ? null : memo.trim(),
+      payment_account_id: Number(paymentAccountId),
+      transfer_account_id: tab === "TRANSFER" ? Number(transferAccountId) : null,
+      items,
+      tag_ids: selectedTagIds,
+    };
+
     setSubmitting(true);
     try {
-      const items =
-        tab === "TRANSFER"
-          ? []
-          : scope === "MIXED"
-            ? splits.map((row, index) => ({
-                category_id: Number(row.categoryId),
-                account_id: null,
-                amount: parseWon(row.amount),
-                scope: row.scope,
-                memo: null,
-                line_no: index + 1,
-              }))
-            : [
-                {
-                  category_id: Number(categoryId),
-                  account_id: null,
-                  amount,
-                  scope,
-                  memo: null,
-                  line_no: 1,
-                },
-              ];
-
-      const payload = {
-        occurred_on: occurredOn,
-        transaction_type: tab,
-        scope: tab === "TRANSFER" ? (scope === "MIXED" ? "PERSONAL" : scope) : scope,
-        amount,
-        memo: memo.trim() === "" ? null : memo.trim(),
-        payment_account_id: Number(paymentAccountId),
-        transfer_account_id: tab === "TRANSFER" ? Number(transferAccountId) : null,
-        items,
-        tag_ids: selectedTagIds,
-      };
+      if (!ignoreDuplicates) {
+        const matches = await checkDuplicateTransactions({
+          organization_id: getOrganizationId(),
+          occurred_on: payload.occurred_on,
+          transaction_type: payload.transaction_type,
+          amount: payload.amount,
+          merchant: payload.merchant,
+          payment_account_id: payload.payment_account_id,
+          transfer_account_id: payload.transfer_account_id,
+          items: payload.items,
+          exclude_id: editing?.id,
+        });
+        if (matches.length > 0) {
+          setDuplicateMatches(matches);
+          return;
+        }
+      }
+      setDuplicateMatches([]);
 
       const saved =
         editing == null
@@ -478,6 +565,16 @@ export function TransactionForm({
             </Stack>
           )}
 
+          {tab !== "TRANSFER" && (
+            <TextField
+              label="사용처 (선택)"
+              value={merchant}
+              onChange={(event) => setMerchant(event.target.value)}
+              placeholder="예: 스타벅스, 이마트"
+              inputProps={{ maxLength: 255 }}
+            />
+          )}
+
           <TextField
             label="메모 (선택)"
             value={memo}
@@ -540,32 +637,119 @@ export function TransactionForm({
                 if (selected === null) {
                   return;
                 }
-                setFiles((current) => [...current, ...Array.from(selected)]);
+                addReceiptFiles(selected);
                 event.target.value = "";
               }}
             />
-            <Button
-              variant="outlined"
-              startIcon={<PhotoCameraIcon />}
+            <Box
+              data-receipt-dropzone="true"
               onClick={() => fileInputRef.current?.click()}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                dropDepthRef.current += 1;
+                if (Array.from(event.dataTransfer.types).includes("Files")) {
+                  setDropActive(true);
+                }
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                event.dataTransfer.dropEffect = "copy";
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
+                if (dropDepthRef.current === 0) {
+                  setDropActive(false);
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                resetDropState();
+                addReceiptFiles(event.dataTransfer.files);
+              }}
+              sx={{
+                border: "2px dashed",
+                borderColor: dropActive ? "primary.main" : "divider",
+                bgcolor: dropActive ? "action.selected" : "grey.50",
+                borderRadius: 2,
+                p: { xs: 2, sm: 2.5 },
+                textAlign: "center",
+                cursor: "pointer",
+                transition: "border-color 0.15s ease, background-color 0.15s ease",
+              }}
             >
-              영수증을 첨부하세요
-            </Button>
-            {files.map((file) => (
-              <Stack key={`${file.name}-${file.size}`} direction="row" alignItems="center" spacing={1} sx={{ mt: 1 }}>
-                <Typography variant="body2" sx={{ flex: 1 }}>
-                  {file.name}
-                </Typography>
-                <IconButton
-                  size="small"
-                  aria-label="첨부 삭제"
-                  onClick={() => setFiles(files.filter((item) => item !== file))}
-                >
-                  <DeleteOutlineIcon fontSize="small" />
-                </IconButton>
-              </Stack>
-            ))}
+              <Button
+                variant={dropActive ? "contained" : "outlined"}
+                startIcon={<PhotoCameraIcon />}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  fileInputRef.current?.click();
+                }}
+              >
+                {dropActive ? "여기에 놓으세요" : "영수증을 첨부하세요"}
+              </Button>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                파일을 끌어다 놓거나, 버튼을 눌러 고를 수 있어요.
+              </Typography>
+            </Box>
+            {savedAttachments.length === 0 && files.length === 0 ? (
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                저장한 뒤에는 미리보기를 눌러 영수증을 확인할 수 있어요.
+              </Typography>
+            ) : (
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                사진을 누르면 영수증을 크게 볼 수 있어요.
+              </Typography>
+            )}
+            <ReceiptGallery
+              transactionId={editing?.id ?? null}
+              attachments={savedAttachments}
+              pendingFiles={files}
+              onRemovePending={(file) => setFiles(files.filter((item) => item !== file))}
+              onOpenSaved={(index) =>
+                setReceiptTarget({
+                  kind: "saved",
+                  transactionId: editing?.id ?? 0,
+                  attachments: savedAttachments,
+                  initialIndex: index,
+                })
+              }
+              onOpenPending={(index) =>
+                setReceiptTarget({ kind: "local", files, initialIndex: index })
+              }
+            />
           </Box>
+          <ReceiptViewerDialog target={receiptTarget} onClose={() => setReceiptTarget(null)} />
+
+          <Dialog open={duplicateMatches.length > 0} onClose={() => setDuplicateMatches([])} fullWidth maxWidth="sm">
+            <DialogTitle sx={{ fontWeight: 800 }}>같은 기록이 이미 있어요</DialogTitle>
+            <DialogContent>
+              <Typography color="text.secondary" sx={{ mb: 1.5 }}>
+                저장하기 전에 한 번 확인해 주세요. 같은 날, 같은 금액으로 이미 입력된 내용이 있습니다.
+              </Typography>
+              <Stack spacing={0.75}>
+                {duplicateMatches.map((row) => (
+                  <Typography key={row.id} sx={{ fontWeight: 700 }}>
+                    {describeDuplicate(row, accounts, categories)}
+                  </Typography>
+                ))}
+              </Stack>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, pb: 2 }}>
+              <Button onClick={() => setDuplicateMatches([])}>돌아가기</Button>
+              <Button
+                variant="contained"
+                disabled={submitting}
+                onClick={() => void handleSubmit(true)}
+              >
+                {submitting ? "저장하는 중…" : "그대로 저장"}
+              </Button>
+            </DialogActions>
+          </Dialog>
 
           {error !== null && <Alert severity="error">{error}</Alert>}
           {success !== null && <Alert severity="success">{success}</Alert>}

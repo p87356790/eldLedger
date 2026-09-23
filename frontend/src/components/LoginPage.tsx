@@ -3,13 +3,13 @@ import { Alert, Box, Button, Card, CardContent, Stack, TextField, Typography } f
 
 import { login } from "../api/client";
 import type { AuthUser } from "../api/client";
+import { APP_VERSION_LABEL } from "../version";
 
 interface LoginPageProps {
   onReady: (user: AuthUser) => void;
-  idleLogout?: boolean;
 }
 
-export function LoginPage({ onReady, idleLogout = false }: LoginPageProps) {
+export function LoginPage({ onReady }: LoginPageProps) {
   const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -37,13 +37,13 @@ export function LoginPage({ onReady, idleLogout = false }: LoginPageProps) {
               <Typography variant="h5" sx={{ fontWeight: 800 }}>
                 eldLedger
               </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 700, color: "text.secondary", mt: 0.35 }}>
+                {APP_VERSION_LABEL}
+              </Typography>
               <Typography color="text.secondary" sx={{ mt: 0.75 }}>
                 사용자명 또는 이메일로 로그인해 주세요.
               </Typography>
             </Box>
-            {idleLogout && (
-              <Alert severity="info">15분 동안 사용하지 않아 로그아웃했어요. 다시 로그인해 주세요.</Alert>
-            )}
             <TextField
               label="사용자명 또는 이메일"
               value={username}

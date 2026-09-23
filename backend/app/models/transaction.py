@@ -46,6 +46,7 @@ class Transaction(IntPKMixin, TimestampMixin, Base):
         index=True,
     )
     amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    merchant: Mapped[str | None] = mapped_column(String(255), nullable=True)
     memo: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[RecordStatus] = mapped_column(
         Enum(RecordStatus, native_enum=False, length=32),

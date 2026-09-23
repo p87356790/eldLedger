@@ -83,7 +83,20 @@ if (Test-PortBusy $port) {
 [System.IO.File]::WriteAllText($envFile, $envText.TrimEnd() + "`n", $utf8)
 
 Write-Host "eldLedger를 준비하고 있습니다. 처음이면 몇 분 걸릴 수 있습니다."
-docker compose up -d --build
+$composeArgs = @("up", "-d", "--build")
+if ($env:ELDLEDGER_FORCE_RECREATE -eq "1") {
+    if ([string]::IsNullOrWhiteSpace($env:BUILD_ID)) {
+        $env:BUILD_ID = Get-Date -Format "yyyyMMddHHmmss"
+    }
+    Write-Host "업데이트라서 화면(프론트) 이미지를 다시 만듭니다. BUILD_ID=$($env:BUILD_ID)"
+    docker compose build --no-cache --build-arg "BUILD_ID=$($env:BUILD_ID)" frontend
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "프론트 이미지 빌드에 실패했습니다."
+        exit $LASTEXITCODE
+    }
+    $composeArgs = @("up", "-d", "--build", "--force-recreate", "--remove-orphans")
+}
+docker compose @composeArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Host "실행에 실패했습니다. Docker Desktop이 켜져 있는지 확인해 주세요."
     exit $LASTEXITCODE

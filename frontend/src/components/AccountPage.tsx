@@ -11,12 +11,13 @@ import {
   Typography,
 } from "@mui/material";
 
-import { changeMyPassword, fetchLoginHistory, resetAllData, updateMyProfile } from "../api/client";
+import { changeMyPassword, fetchLoginHistory, resetAllData, resetMyLedger, updateMyProfile } from "../api/client";
 import type { AuditLogItem, AuthUser } from "../api/client";
 
 interface AccountPageProps {
   user: AuthUser;
   onUserChange: (user: AuthUser) => void;
+  onLedgerReset: () => Promise<void>;
   onFactoryReset: () => void;
 }
 
@@ -28,9 +29,10 @@ const ACTION_LABEL: Record<string, string> = {
   PASSWORD_CHANGE: "비밀번호 변경",
   SETUP: "초기 설정",
   PROFILE_UPDATE: "프로필 수정",
+  LEDGER_RESET: "장부 초기화",
 };
 
-export function AccountPage({ user, onUserChange, onFactoryReset }: AccountPageProps) {
+export function AccountPage({ user, onUserChange, onLedgerReset, onFactoryReset }: AccountPageProps) {
   const [displayName, setDisplayName] = useState<string>(user.display_name);
   const [email, setEmail] = useState<string>(user.email);
   const [currentPassword, setCurrentPassword] = useState<string>("");
@@ -40,6 +42,9 @@ export function AccountPage({ user, onUserChange, onFactoryReset }: AccountPageP
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
+  const [ledgerPassword, setLedgerPassword] = useState<string>("");
+  const [ledgerConfirm, setLedgerConfirm] = useState<string>("");
+  const [resettingLedger, setResettingLedger] = useState<boolean>(false);
   const [resetPassword, setResetPassword] = useState<string>("");
   const [resetConfirm, setResetConfirm] = useState<string>("");
   const [resetting, setResetting] = useState<boolean>(false);
@@ -85,6 +90,29 @@ export function AccountPage({ user, onUserChange, onFactoryReset }: AccountPageP
       setError(caught instanceof Error ? caught.message : "비밀번호를 바꾸지 못했어요.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleLedgerReset = async (): Promise<void> => {
+    setError(null);
+    setMessage(null);
+    if (ledgerConfirm.trim() !== RESET_CONFIRM) {
+      setError(`확인을 위해 "${RESET_CONFIRM}"를 입력해 주세요.`);
+      return;
+    }
+    setResettingLedger(true);
+    try {
+      const result = await resetMyLedger(ledgerPassword, ledgerConfirm.trim());
+      setLedgerPassword("");
+      setLedgerConfirm("");
+      await onLedgerReset();
+      const rows = await fetchLoginHistory();
+      setHistory(rows);
+      setMessage(`${result.display_name} 장부를 비웠어요. 거래 ${result.transactions_deleted}건을 지우고 표준 분류를 다시 넣었어요.`);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "장부를 초기화하지 못했어요.");
+    } finally {
+      setResettingLedger(false);
     }
   };
 
@@ -179,15 +207,45 @@ export function AccountPage({ user, onUserChange, onFactoryReset }: AccountPageP
           )}
         </CardContent>
       </Card>
+      <Card sx={{ borderColor: "warning.light" }} variant="outlined">
+        <CardContent sx={{ p: { xs: 2, sm: 2.5 } }}>
+          <Stack spacing={2}>
+            <Typography sx={{ fontWeight: 800 }}>내 장부 초기화</Typography>
+            <Typography color="text.secondary">
+              이 계정(로그인 사용자)의 거래·영수증·자산·분류만 지우고 처음 쓰는 상태로 돌립니다. 다른 사용자 장부와 로그인 계정은 그대로 둡니다.
+            </Typography>
+            <TextField
+              label="현재 비밀번호"
+              type="password"
+              value={ledgerPassword}
+              onChange={(event) => setLedgerPassword(event.target.value)}
+            />
+            <TextField
+              label={`확인 문구 (${RESET_CONFIRM})`}
+              value={ledgerConfirm}
+              onChange={(event) => setLedgerConfirm(event.target.value)}
+            />
+            <Button
+              color="warning"
+              variant="contained"
+              disabled={resettingLedger || resetting || saving}
+              onClick={() => void handleLedgerReset()}
+              sx={{ alignSelf: "flex-start" }}
+            >
+              {resettingLedger ? "지우는 중…" : "내 장부만 비우기"}
+            </Button>
+          </Stack>
+        </CardContent>
+      </Card>
       {user.role === "ADMIN" && (
         <Card sx={{ borderColor: "error.light" }} variant="outlined">
           <CardContent sx={{ p: { xs: 2, sm: 2.5 } }}>
             <Stack spacing={2}>
               <Typography sx={{ fontWeight: 800 }} color="error">
-                데이터 전체 초기화
+                모든 계정 삭제 (처음 설치로)
               </Typography>
               <Typography color="text.secondary">
-                모든 기록, 사용자, 첨부파일을 지우고 처음 설치 화면으로 돌아갑니다. 표준 분류는 다시 만들어 두며, 백업 폴더는 그대로 둡니다. 지우기 전에 설정 → 데이터 백업/복원에서 파일을 받아 두세요.
+                모든 사용자의 기록과 로그인 계정을 지우고 처음 설치 화면으로 돌아갑니다. 한 사람 장부만 비우려면 위의 「내 장부 초기화」를 쓰세요.
               </Typography>
               <TextField
                 label="현재 비밀번호"

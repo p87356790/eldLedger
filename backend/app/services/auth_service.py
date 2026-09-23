@@ -5,14 +5,16 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.init_db import DEFAULT_ORGANIZATION_NAME
-from app.db.reset import CONFIRM_PHRASE, reset_all_data
+from app.db.reset import CONFIRM_PHRASE, reset_all_data, reset_user_ledger
 from app.models import AuditLog, Organization, RefreshToken, User
 from app.models.enums import UserRole
 from app.repositories.user_repository import UserRepository
 from app.services.chart_template_service import ChartTemplateService
 from app.schemas.auth import (
+    AdminPasswordSet,
     AuthResponse,
     FactoryResetRequest,
+    LedgerResetResult,
     LoginRequest,
     PasswordChange,
     ProfileUpdate,
@@ -51,6 +53,29 @@ class AuthService:
         reset_all_data(self._session)
         self._session.flush()
         return self.setup_status()
+
+    def reset_ledger(
+        self,
+        actor: User,
+        payload: FactoryResetRequest,
+        *,
+        target_user_id: int | None = None,
+    ) -> LedgerResetResult:
+        if payload.confirm.strip() != CONFIRM_PHRASE:
+            raise AccountingError(f'확인을 위해 "{CONFIRM_PHRASE}"를 입력해 주세요.')
+        if not verify_password(payload.password, actor.hashed_password):
+            raise AccountingError("비밀번호가 올바르지 않아요.")
+        user = actor if target_user_id is None else self._require_org_user(actor, target_user_id)
+        deleted = reset_user_ledger(self._session, user)
+        self._audit.record(
+            action="LEDGER_RESET",
+            user_id=actor.id,
+            entity_type="user",
+            entity_id=user.id,
+            details=f"{user.username} 장부 초기화 · 거래 {deleted}건",
+        )
+        self._session.flush()
+        return LedgerResetResult(transactions_deleted=deleted, user_id=user.id, display_name=user.display_name)
 
     def complete_setup(self, payload: SetupCreate) -> AuthResponse:
         if self._users.count() > 0:
@@ -159,11 +184,24 @@ class AuthService:
             raise AccountingError("현재 비밀번호가 올바르지 않아요.")
         if payload.current_password == payload.new_password:
             raise AccountingError("새 비밀번호는 지금과 달라야 해요.")
-        user.hashed_password = hash_password(payload.new_password)
-        for token in user.refresh_tokens:
-            if token.revoked_at is None:
-                token.revoked_at = datetime.now(timezone.utc)
+        self._replace_password(user, payload.new_password)
         self._audit.record(action="PASSWORD_CHANGE", user_id=user.id, entity_type="user", entity_id=user.id)
+        self._session.flush()
+
+    def set_user_password(self, actor: User, user_id: int, payload: AdminPasswordSet) -> None:
+        if not verify_password(payload.admin_password, actor.hashed_password):
+            raise AccountingError("관리자 비밀번호가 올바르지 않아요.")
+        user = self._require_org_user(actor, user_id)
+        if verify_password(payload.new_password, user.hashed_password):
+            raise AccountingError("새 비밀번호는 지금과 달라야 해요.")
+        self._replace_password(user, payload.new_password)
+        self._audit.record(
+            action="PASSWORD_CHANGE",
+            user_id=actor.id,
+            entity_type="user",
+            entity_id=user.id,
+            details=f"{user.username} 비밀번호를 관리자가 바꿈",
+        )
         self._session.flush()
 
     def login_history(self, user: User, *, limit: int = 20) -> list[AuditLog]:
@@ -245,6 +283,13 @@ class AuthService:
         if user is None or not user.is_active or stored.user_id != user.id:
             raise AccountingError("다시 로그인해 주세요.")
         return user, stored
+
+    def _replace_password(self, user: User, new_password: str) -> None:
+        user.hashed_password = hash_password(new_password)
+        now = datetime.now(timezone.utc)
+        for token in user.refresh_tokens:
+            if token.revoked_at is None:
+                token.revoked_at = now
 
     def _require_org_user(self, actor: User, user_id: int) -> User:
         user = self._users.get(user_id)

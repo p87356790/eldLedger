@@ -6,6 +6,7 @@ from pathlib import Path
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-32-bytes-minimum!!")
 os.environ.setdefault("DATA_DIR", str(Path(tempfile.gettempdir()) / "eldledger-test-data"))
+os.environ.setdefault("BACKUP_SCHEDULER_ENABLED", "false")
 
 import pytest
 from fastapi.testclient import TestClient

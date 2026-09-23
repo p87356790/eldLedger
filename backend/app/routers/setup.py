@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.schemas.auth import AuthResponse, FactoryResetRequest, SetupCreate, SetupStatus
-from app.security.deps import require_admin
+from app.schemas.auth import AuthResponse, FactoryResetRequest, LedgerResetResult, SetupCreate, SetupStatus
+from app.security.deps import get_current_user, require_admin
 from app.services.accounting_service import AccountingError
 from app.services.auth_service import AuthService
 
@@ -24,6 +24,18 @@ def setup_status(service: AuthService = Depends(_service)) -> SetupStatus:
 def complete_setup(payload: SetupCreate, service: AuthService = Depends(_service)) -> AuthResponse:
     try:
         return service.complete_setup(payload)
+    except AccountingError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+
+@router.post("/reset-ledger", response_model=LedgerResetResult)
+def reset_my_ledger(
+    payload: FactoryResetRequest,
+    actor: User = Depends(get_current_user),
+    service: AuthService = Depends(_service),
+) -> LedgerResetResult:
+    try:
+        return service.reset_ledger(actor, payload)
     except AccountingError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 

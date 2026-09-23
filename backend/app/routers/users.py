@@ -4,7 +4,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas.auth import (
+    AdminPasswordSet,
     AuditLogRead,
+    FactoryResetRequest,
+    LedgerResetResult,
     PasswordChange,
     ProfileUpdate,
     UserCreate,
@@ -80,6 +83,21 @@ def create_user(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
 
+@router.post("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
+def set_user_password(
+    user_id: int,
+    payload: AdminPasswordSet,
+    actor: User = Depends(require_admin),
+    service: AuthService = Depends(_service),
+) -> None:
+    try:
+        service.set_user_password(actor, user_id, payload)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except AccountingError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+
 @router.patch("/{user_id}", response_model=UserRead)
 def update_user(
     user_id: int,
@@ -89,6 +107,21 @@ def update_user(
 ) -> UserRead:
     try:
         return service.update_user(actor, user_id, payload)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except AccountingError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+
+@router.post("/{user_id}/reset-ledger", response_model=LedgerResetResult)
+def reset_user_ledger_endpoint(
+    user_id: int,
+    payload: FactoryResetRequest,
+    actor: User = Depends(require_admin),
+    service: AuthService = Depends(_service),
+) -> LedgerResetResult:
+    try:
+        return service.reset_ledger(actor, payload, target_user_id=user_id)
     except LookupError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     except AccountingError as error:

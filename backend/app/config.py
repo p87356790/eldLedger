@@ -34,6 +34,8 @@ class Settings(BaseSettings):
         "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173"
     )
     data_dir: str = Field(default_factory=_default_data_dir)
+    backup_scheduler_enabled: bool = True
+    backup_scheduler_interval_seconds: int = 60
 
     @model_validator(mode="after")
     def apply_database_url(self) -> Self:

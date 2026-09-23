@@ -75,6 +75,12 @@ export interface Attachment {
   file_size: number;
 }
 
+export interface AttachmentFile {
+  blob: Blob;
+  filename: string;
+  contentType: string;
+}
+
 export interface Transaction {
   id: number;
   organization_id: number;
@@ -82,6 +88,7 @@ export interface Transaction {
   transaction_type: TransactionType;
   scope: Scope;
   amount: number;
+  merchant: string | null;
   memo: string | null;
   status: RecordStatus;
   payment_account_id: number;
@@ -102,6 +109,7 @@ export interface TransactionCreatePayload {
   transaction_type: TransactionType;
   scope: Scope;
   amount: number;
+  merchant: string | null;
   memo: string | null;
   payment_account_id: number;
   transfer_account_id: number | null;
@@ -252,6 +260,24 @@ export function fetchTransaction(transactionId: number): Promise<Transaction> {
   return getJson<Transaction>(`/api/transactions/${transactionId}`);
 }
 
+export interface DuplicateCheckPayload {
+  organization_id: number;
+  occurred_on: string;
+  transaction_type: TransactionType;
+  amount: number;
+  merchant: string | null;
+  payment_account_id: number;
+  transfer_account_id: number | null;
+  items: TransactionCreatePayload["items"];
+  exclude_id?: number;
+}
+
+export function checkDuplicateTransactions(payload: DuplicateCheckPayload): Promise<Transaction[]> {
+  return sendJson<{ matches: Transaction[] }>("/api/transactions/duplicate-check", "POST", payload).then(
+    (body) => body.matches,
+  );
+}
+
 export type TransactionUpdatePayload = Omit<TransactionCreatePayload, "organization_id">;
 
 export function updateTransaction(transactionId: number, payload: TransactionUpdatePayload): Promise<Transaction> {
@@ -282,10 +308,12 @@ export interface DashboardTransactionRow {
   id: number;
   occurred_on: string;
   amount: number;
+  signed_amount?: number;
   transaction_type: TransactionType;
   scope: Scope;
   category_name: string | null;
   payment_method: string;
+  merchant: string | null;
   memo: string | null;
   has_attachment: boolean;
 }
@@ -294,6 +322,18 @@ export interface DashboardSummaryResponse {
   summary: DashboardPeriodSummary;
   daily: DashboardDailyAggregate[];
   transactions: DashboardTransactionRow[];
+  previous_start_date: string;
+  previous_end_date: string;
+  category_totals: DashboardCategoryTotal[];
+}
+
+export interface DashboardCategoryTotal {
+  category_id: number | null;
+  name: string;
+  transaction_type: TransactionType;
+  current_amount: number;
+  previous_amount: number;
+  sort_order: number;
 }
 
 export function fetchDashboardSummary(params: {
@@ -328,6 +368,23 @@ export async function uploadAttachment(transactionId: number, file: File): Promi
     throw new Error(await parseError(response));
   }
   return (await response.json()) as Attachment;
+}
+
+export async function fetchAttachmentFile(
+  transactionId: number,
+  attachmentId: number,
+): Promise<AttachmentFile> {
+  const response = await authorizedFetch(`/api/transactions/${transactionId}/attachments/${attachmentId}`);
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const blob = await response.blob();
+  const contentType = response.headers.get("content-type") ?? blob.type;
+  return {
+    blob,
+    filename: "",
+    contentType: contentType.split(";")[0].trim() || "application/octet-stream",
+  };
 }
 
 export type InstrumentKind = "CASH" | "BANK" | "CREDIT_CARD" | "LOAN" | "OTHER_ASSET";
@@ -408,6 +465,20 @@ export function resetAllData(password: string, confirm: string): Promise<SetupSt
   return sendJson<SetupStatus>("/api/v1/setup/reset", "POST", { password, confirm });
 }
 
+export interface LedgerResetResult {
+  transactions_deleted: number;
+  user_id: number;
+  display_name: string;
+}
+
+export function resetMyLedger(password: string, confirm: string): Promise<LedgerResetResult> {
+  return sendJson<LedgerResetResult>("/api/v1/setup/reset-ledger", "POST", { password, confirm });
+}
+
+export function resetUserLedger(userId: number, password: string, confirm: string): Promise<LedgerResetResult> {
+  return sendJson<LedgerResetResult>(`/api/v1/users/${userId}/reset-ledger`, "POST", { password, confirm });
+}
+
 export interface LedgerImportResult {
   wallets_created: number;
   wallets_matched: number;
@@ -435,6 +506,42 @@ export async function downloadLedgerBackup(): Promise<void> {
   URL.revokeObjectURL(url);
 }
 
+export interface ConfigImportResult {
+  wallets_deleted: number;
+  wallets_created: number;
+  categories_deleted: number;
+  categories_created: number;
+}
+
+export async function downloadConfigExport(): Promise<void> {
+  const response = await authorizedFetch("/api/v1/backup/config/export");
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const data = await response.json();
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 10);
+  link.href = url;
+  link.download = `eldledger-config-${stamp}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function importConfigFile(file: File): Promise<ConfigImportResult> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await authorizedFetch("/api/v1/backup/config/import", {
+    method: "POST",
+    body,
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return (await response.json()) as ConfigImportResult;
+}
+
 export async function importLedgerBackup(file: File, replace: boolean = false): Promise<LedgerImportResult> {
   const body = new FormData();
   body.append("file", file);
@@ -447,6 +554,85 @@ export async function importLedgerBackup(file: File, replace: boolean = false): 
     throw new Error(await parseError(response));
   }
   return (await response.json()) as LedgerImportResult;
+}
+
+export type BackupFrequency = "daily" | "weekly" | "monthly";
+
+export interface BackupSchedule {
+  enabled: boolean;
+  frequency: BackupFrequency;
+  weekday: number;
+  monthday: number;
+  hour: number;
+  last_run_at: string | null;
+  last_run_status: string | null;
+  last_run_filename: string | null;
+  last_error: string | null;
+  retention_days: number;
+  next_run_at: string | null;
+}
+
+export interface BackupScheduleUpdate {
+  enabled: boolean;
+  frequency: BackupFrequency;
+  weekday: number;
+  monthday: number;
+  hour: number;
+}
+
+export interface ServerBackupFile {
+  filename: string;
+  created_at: string;
+  size_bytes: number;
+  kind: "zip" | "directory";
+}
+
+export interface ServerBackupRunResult {
+  filename: string;
+  size_bytes: number;
+  purged_count: number;
+}
+
+export interface ServerBackupDeleteResult {
+  deleted: string[];
+}
+
+export function fetchBackupSchedule(): Promise<BackupSchedule> {
+  return getJson<BackupSchedule>("/api/v1/backup/server/settings");
+}
+
+export function saveBackupSchedule(payload: BackupScheduleUpdate): Promise<BackupSchedule> {
+  return sendJson<BackupSchedule>("/api/v1/backup/server/settings", "PUT", payload);
+}
+
+export function fetchServerBackups(): Promise<ServerBackupFile[]> {
+  return getJson<ServerBackupFile[]>("/api/v1/backup/server/files");
+}
+
+export async function runServerBackup(): Promise<ServerBackupRunResult> {
+  const response = await authorizedFetch("/api/v1/backup/server/run", { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return (await response.json()) as ServerBackupRunResult;
+}
+
+export async function downloadServerBackup(filename: string): Promise<void> {
+  const response = await authorizedFetch(`/api/v1/backup/server/files/${encodeURIComponent(filename)}`);
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename.endsWith(".zip") ? filename : `${filename}.zip`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+export function deleteServerBackups(filenames: string[]): Promise<ServerBackupDeleteResult> {
+  return sendJson<ServerBackupDeleteResult>("/api/v1/backup/server/files/delete", "POST", { filenames });
 }
 
 function applyAuth(response: AuthResponse): AuthUser {
@@ -521,6 +707,13 @@ export function deactivateUser(userId: number): Promise<AuthUser> {
   return sendJson<AuthUser>(`/api/v1/users/${userId}/deactivate`, "POST", {});
 }
 
+export function setUserPassword(userId: number, adminPassword: string, newPassword: string): Promise<void> {
+  return sendJson<void>(`/api/v1/users/${userId}/password`, "POST", {
+    admin_password: adminPassword,
+    new_password: newPassword,
+  });
+}
+
 export type CsvAmountMode = "SIGNED" | "UNSIGNED_EXPENSE" | "SPLIT";
 
 export interface ImportProfile {
@@ -550,6 +743,8 @@ export interface ImportPreviewRow {
   scope: Scope;
   category_id: number | null;
   category_name: string | null;
+  payment_account_id: number | null;
+  payment_account_name: string | null;
   tag_ids: number[];
   suggested: boolean;
   duplicate: boolean;
@@ -580,6 +775,7 @@ export interface ImportCommitRow {
   category_id: number;
   tag_ids: number[];
   skip: boolean;
+  payment_account_id?: number | null;
 }
 
 export interface ImportCommitResponse {
@@ -619,13 +815,15 @@ export function fetchImportProfiles(): Promise<ImportProfile[]> {
 
 export async function previewImport(payload: {
   file: File;
-  accountId: number;
+  accountId?: number | null;
   organizationId?: number;
   profileId?: number | null;
 }): Promise<ImportPreviewResponse> {
   const body = new FormData();
   body.append("file", payload.file);
-  body.append("account_id", String(payload.accountId));
+  if (payload.accountId != null) {
+    body.append("account_id", String(payload.accountId));
+  }
   body.append("organization_id", String(payload.organizationId ?? getOrganizationId()));
   if (payload.profileId !== undefined && payload.profileId !== null) {
     body.append("profile_id", String(payload.profileId));
@@ -639,7 +837,7 @@ export async function previewImport(payload: {
 
 export function commitImport(payload: {
   organization_id: number;
-  payment_account_id: number;
+  payment_account_id?: number | null;
   rows: ImportCommitRow[];
 }): Promise<ImportCommitResponse> {
   return sendJson<ImportCommitResponse>("/api/v1/import/commit", "POST", payload);

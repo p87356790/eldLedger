@@ -236,10 +236,117 @@ def test_dashboard_filters_by_owned_account(client: TestClient, db_session: Sess
     assert body["transactions"][0]["category_name"] == "식비"
     assert body["transactions"][0]["has_attachment"] is False
 
+    _post_tx(
+        client,
+        organization_id=organization.id,
+        occurred_on="2026-09-12",
+        transaction_type="TRANSFER",
+        scope="PERSONAL",
+        amount=20_000,
+        payment_account_id=bank["id"],
+        transfer_account_id=cash["id"],
+        memo="은행에서 현금",
+    )
+    incoming = client.get(
+        f"/api/v1/dashboard/summary?start_date=2026-09-01&end_date=2026-09-30&account_id={cash['id']}"
+    )
+    assert incoming.status_code == 200, incoming.text
+    cash_body = incoming.json()
+    assert cash_body["summary"]["total_income"] == 20_000
+    assert cash_body["summary"]["total_expense"] == 12_000
+    cash_daily = {row["date"]: row for row in cash_body["daily"]}
+    assert cash_daily["2026-09-12"]["total_income"] == 20_000
+    assert cash_daily["2026-09-12"]["transaction_count"] == 1
+    transfer_row = next(row for row in cash_body["transactions"] if row["transaction_type"] == "TRANSFER")
+    assert transfer_row["signed_amount"] == 20_000
+    assert "→" in transfer_row["payment_method"]
+
+    outgoing = client.get(
+        f"/api/v1/dashboard/summary?start_date=2026-09-01&end_date=2026-09-30&account_id={bank['id']}"
+    ).json()
+    assert outgoing["summary"]["total_income"] == 0
+    assert outgoing["summary"]["total_expense"] == 53_000
+    bank_transfer = next(row for row in outgoing["transactions"] if row["transaction_type"] == "TRANSFER")
+    assert bank_transfer["signed_amount"] == -20_000
+
     missing = client.get(
         "/api/v1/dashboard/summary?start_date=2026-09-01&end_date=2026-09-30&account_id=999999"
     )
     assert missing.status_code == 404
+
+
+def test_dashboard_rolls_up_parent_categories_with_previous_month(client: TestClient, db_session: Session) -> None:
+    organization = _seed(db_session)
+    wallets = _wallets(client, organization.id)
+    categories = _categories(client, organization.id)
+    cash = wallets["CASH"]
+
+    _post_tx(
+        client,
+        organization_id=organization.id,
+        occurred_on="2026-08-20",
+        transaction_type="EXPENSE",
+        scope="PERSONAL",
+        amount=80_000,
+        payment_account_id=cash["id"],
+        category_id=categories["공과금"]["id"],
+    )
+    _post_tx(
+        client,
+        organization_id=organization.id,
+        occurred_on="2026-08-21",
+        transaction_type="EXPENSE",
+        scope="PERSONAL",
+        amount=20_000,
+        payment_account_id=cash["id"],
+        category_id=categories["식비"]["id"],
+    )
+    _post_tx(
+        client,
+        organization_id=organization.id,
+        occurred_on="2026-09-04",
+        transaction_type="EXPENSE",
+        scope="PERSONAL",
+        amount=100_000,
+        payment_account_id=cash["id"],
+        category_id=categories["공과금"]["id"],
+    )
+    _post_tx(
+        client,
+        organization_id=organization.id,
+        occurred_on="2026-09-05",
+        transaction_type="EXPENSE",
+        scope="PERSONAL",
+        amount=45_000,
+        payment_account_id=cash["id"],
+        category_id=categories["간식"]["id"],
+    )
+    _post_tx(
+        client,
+        organization_id=organization.id,
+        occurred_on="2026-09-06",
+        transaction_type="INCOME",
+        scope="PERSONAL",
+        amount=50_000,
+        payment_account_id=cash["id"],
+        category_id=categories["급여"]["id"],
+    )
+
+    body = client.get("/api/v1/dashboard/summary?start_date=2026-09-01&end_date=2026-09-30").json()
+    assert body["previous_start_date"] == "2026-08-01"
+    assert body["previous_end_date"] == "2026-08-31"
+    expenses = {row["name"]: row for row in body["category_totals"] if row["transaction_type"] == "EXPENSE"}
+    incomes = {row["name"]: row for row in body["category_totals"] if row["transaction_type"] == "INCOME"}
+    assert "공과금" not in expenses
+    assert "간식" not in expenses
+    assert expenses["주거"]["current_amount"] == 100_000
+    assert expenses["주거"]["previous_amount"] == 80_000
+    assert expenses["식비"]["current_amount"] == 45_000
+    assert expenses["식비"]["previous_amount"] == 20_000
+    assert incomes["급여"]["current_amount"] == 50_000
+    assert incomes["급여"]["previous_amount"] == 0
+    assert body["summary"]["total_expense"] == 145_000
+    assert body["summary"]["total_income"] == 50_000
 
 
 def test_dashboard_hides_other_users_transactions(client: TestClient, db_session: Session) -> None:

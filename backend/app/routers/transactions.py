@@ -1,6 +1,8 @@
 from datetime import date
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -9,6 +11,8 @@ from app.schemas.accounting import (
     AccountRead,
     AttachmentRead,
     CategoryRead,
+    DuplicateCheckRequest,
+    DuplicateCheckResponse,
     TransactionCreate,
     TransactionListResponse,
     TransactionRead,
@@ -101,6 +105,19 @@ def list_transactions(
     )
 
 
+@router.post("/transactions/duplicate-check", response_model=DuplicateCheckResponse)
+def check_duplicate_transactions(
+    payload: DuplicateCheckRequest,
+    service: TransactionService = Depends(_service),
+    user: User = Depends(get_current_user),
+) -> DuplicateCheckResponse:
+    try:
+        matches = service.find_duplicates(payload, created_by_user_id=user.id)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    return DuplicateCheckResponse(matches=[TransactionRead.model_validate(row) for row in matches])
+
+
 @router.get("/transactions/{transaction_id}", response_model=TransactionRead)
 def get_transaction(
     transaction_id: int,
@@ -165,3 +182,24 @@ async def upload_attachment(
     except AccountingError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     return AttachmentRead.model_validate(attachment)
+
+
+@router.get("/transactions/{transaction_id}/attachments/{attachment_id}", response_model=None)
+def download_attachment(
+    transaction_id: int,
+    attachment_id: int,
+    service: TransactionService = Depends(_service),
+) -> FileResponse:
+    try:
+        attachment, path = service.get_attachment_file(transaction_id, attachment_id)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    quoted = quote(attachment.original_filename)
+    return FileResponse(
+        path=path,
+        media_type=attachment.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quoted}",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

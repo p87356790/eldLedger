@@ -71,7 +71,7 @@ export function TransactionEditDialog({
       fullScreen={fullScreen}
       scroll="paper"
     >
-      <DialogTitle sx={{ fontWeight: 800 }}>거래 상세 / 수정</DialogTitle>
+      <DialogTitle sx={{ fontWeight: 800 }}>기록 확인 / 수정</DialogTitle>
       <DialogContent dividers sx={{ pt: 2 }}>
         {error !== null && <Alert severity="error">{error}</Alert>}
         {error === null && transaction == null && (

@@ -6,7 +6,8 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build
+ARG BUILD_ID=0
+RUN echo "eldLedger frontend BUILD_ID=$BUILD_ID" && npm run build
 
 FROM nginx:1.27-alpine
 

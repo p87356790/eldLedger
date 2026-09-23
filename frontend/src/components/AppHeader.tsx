@@ -23,6 +23,7 @@ import {
 
 import type { AuthUser } from "../api/client";
 import { isSettingsPath, MAIN_NAV, SETTINGS_NAV } from "../nav";
+import { APP_VERSION_LABEL } from "../version";
 
 interface AppHeaderProps {
   user: AuthUser;
@@ -64,9 +65,14 @@ export function AppHeader({ user, onLogout }: AppHeaderProps) {
       <AppBar position="sticky" elevation={0}>
         <Toolbar sx={{ gap: 1, minHeight: { xs: 64, md: 72 } }}>
           <Box sx={{ mr: { xs: 0, md: 1 }, minWidth: 0 }}>
-            <Typography variant="h6" component="h1" sx={{ fontWeight: 800, lineHeight: 1.2 }}>
-              eldLedger
-            </Typography>
+            <Box sx={{ display: "flex", alignItems: "baseline", columnGap: 1, whiteSpace: "nowrap" }}>
+              <Typography variant="h6" component="h1" sx={{ fontWeight: 800, lineHeight: 1.2 }}>
+                eldLedger
+              </Typography>
+              <Typography variant="caption" sx={{ fontWeight: 700, opacity: 0.92, letterSpacing: 0.2 }}>
+                {APP_VERSION_LABEL}
+              </Typography>
+            </Box>
             <Typography variant="caption" sx={{ opacity: 0.85, display: "block" }} noWrap>
               {user.display_name}
             </Typography>

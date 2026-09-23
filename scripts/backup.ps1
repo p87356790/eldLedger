@@ -15,4 +15,11 @@ if (Test-Path $uploads) {
     Copy-Item -Path $uploads -Destination (Join-Path $dest "uploads") -Recurse -Force
 }
 
+$backupRoot = Join-Path $root "data\backups"
+if (Test-Path $backupRoot) {
+    Get-ChildItem $backupRoot | Where-Object {
+        $_.Name -like "eldledger-*" -and $_.LastWriteTime -lt (Get-Date).AddDays(-30)
+    } | Remove-Item -Recurse -Force
+}
+
 Write-Host "백업했습니다: $dest"

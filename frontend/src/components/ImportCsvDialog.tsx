@@ -19,6 +19,7 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  TextField,
   ToggleButton,
   ToggleButtonGroup,
   Typography,
@@ -68,7 +69,9 @@ const SCOPE_LABEL: Record<Exclude<Scope, "MIXED">, string> = {
 };
 
 function downloadEmptyTemplate(): void {
-  const csv = "\uFEFF날짜,가맹점,메모,금액,구분\n";
+  const csv =
+    "\uFEFF언제인가요?,사용처,어떻게 냈나요?,얼마인가요?,어디에 사용했나요?,메모\n" +
+    "2026.04.30,한국전력공사,신한카드,\"29100\",주거/공과금,\n";
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -90,6 +93,7 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<WizardStep>(1);
   const [file, setFile] = useState<File | null>(null);
+  const [pasteText, setPasteText] = useState<string>("");
   const [accountId, setAccountId] = useState<string>("");
   const [profileId, setProfileId] = useState<string>("");
   const [profiles, setProfiles] = useState<ImportProfile[]>([]);
@@ -122,6 +126,7 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
     }
     setStep(1);
     setFile(null);
+    setPasteText("");
     setAccountId("");
     setProfileId("");
     setRows([]);
@@ -145,19 +150,20 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
 
   const handlePreview = async (): Promise<void> => {
     setError(null);
-    if (file === null) {
-      setError("CSV 파일을 선택해 주세요.");
-      return;
-    }
-    if (accountId === "") {
-      setError("어느 계좌로 가져올지 선택해 주세요.");
+    const source =
+      file ??
+      (pasteText.trim() === ""
+        ? null
+        : new File([pasteText], "cashbook.csv", { type: "text/csv;charset=utf-8" }));
+    if (source === null) {
+      setError("표를 붙여넣거나 CSV 파일을 선택해 주세요.");
       return;
     }
     setBusy(true);
     try {
       const preview = await previewImport({
-        file,
-        accountId: Number(accountId),
+        file: source,
+        accountId: accountId === "" ? null : Number(accountId),
         profileId: profileId === "" ? null : Number(profileId),
       });
       setRows(preview.rows.map(toEditable));
@@ -200,11 +206,14 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
         row.amount <= 0 ||
         row.merchant === "" ||
         row.category_id === null ||
+        row.payment_account_id === null ||
         row.transaction_type === null ||
         row.transaction_type === "TRANSFER",
     );
     if (missing.length > 0) {
-      setError("선택한 건 중 날짜·금액·가맹점·분류가 빠진 항목이 있어요.");
+      setError(
+        "선택한 건 중 날짜·금액·가맹점·분류·결제수단이 빠진 항목이 있어요. 표의 자산 이름이 목록과 같은지 확인해 주세요.",
+      );
       return;
     }
     if (payloadRows.length === 0) {
@@ -215,17 +224,18 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
     try {
       const result = await commitImport({
         organization_id: getOrganizationId(),
-        payment_account_id: Number(accountId),
+        payment_account_id: accountId === "" ? null : Number(accountId),
         rows: payloadRows.map((row) => ({
           occurred_on: row.occurred_on as string,
           amount: row.amount as number,
           merchant: row.merchant,
-          memo: row.memo,
+          memo: row.memo === null || row.memo.trim() === "" ? null : row.memo.trim(),
           transaction_type: row.transaction_type as "INCOME" | "EXPENSE",
           scope: row.scope === "MIXED" ? "PERSONAL" : row.scope,
           category_id: row.category_id as number,
           tag_ids: row.tag_ids,
           skip: false,
+          payment_account_id: row.payment_account_id,
         })),
       });
       setCreated(result.created);
@@ -249,7 +259,7 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
 
   return (
     <Dialog open={open} onClose={busy ? undefined : onClose} fullWidth maxWidth={step === 2 ? "lg" : "sm"}>
-      <DialogTitle>CSV 가져오기</DialogTitle>
+      <DialogTitle>표 붙여넣기 / CSV 가져오기</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
           {error !== null && <Alert severity="error">{error}</Alert>}
@@ -257,13 +267,23 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
           {step === 1 && (
             <>
               <Typography color="text.secondary">
-                카드나 은행에서 받은 CSV를 올리거나, 빈 양식을 받아 날짜·가맹점·금액을 채워 가져올 수 있어요. 지출은
-                금액을 -12000처럼 음수로, 수입은 양수로 적어요.
+                엑셀·한글에서 표를 복사해 붙여넣거나, CSV 파일을 올릴 수 있어요. 열 이름은 기록 화면과 같아도 됩니다
+                (언제인가요?, 사용처, 어떻게 냈나요?, 얼마인가요?, 어디에 사용했나요?, 메모). 시간은 무시하고 년월일만
+                넣습니다. 금액은 29,100처럼 양수로 적어도 지출로 들어갑니다.{" "}
+                <strong>어떻게 냈나요?</strong>에는 자산 이름을 그대로 적으면 행마다 다른 카드·계좌로 들어갑니다.
               </Typography>
+              <TextField
+                label="표 붙여넣기"
+                placeholder={"언제인가요?\t사용처\t어떻게 냈나요?\t얼마인가요?\t어디에 사용했나요?\t메모"}
+                value={pasteText}
+                onChange={(event) => setPasteText(event.target.value)}
+                multiline
+                minRows={6}
+              />
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv,text/csv"
+                accept=".csv,.txt,.tsv,text/csv,text/tab-separated-values"
                 hidden
                 onChange={(event) => {
                   setFile(event.target.files?.[0] ?? null);
@@ -278,13 +298,15 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
                 </Button>
               </Stack>
               <FormControl fullWidth>
-                <InputLabel id="import-account-label">어느 계좌인가요?</InputLabel>
+                <InputLabel id="import-account-label">못 찾은 행만 이 자산으로 (선택)</InputLabel>
                 <Select
                   labelId="import-account-label"
-                  label="어느 계좌인가요?"
+                  label="못 찾은 행만 이 자산으로 (선택)"
                   value={accountId}
+                  displayEmpty
                   onChange={(event) => setAccountId(String(event.target.value))}
                 >
+                  <MenuItem value="">표의 어떻게 냈나요?만 사용</MenuItem>
                   {activeWallets.map((wallet) => (
                     <MenuItem key={wallet.id} value={String(wallet.id)}>
                       {wallet.name}
@@ -375,7 +397,9 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
                         />
                       </TableCell>
                       <TableCell>날짜</TableCell>
-                      <TableCell>가맹점</TableCell>
+                      <TableCell>사용처</TableCell>
+                      <TableCell>메모</TableCell>
+                      <TableCell>결제</TableCell>
                       <TableCell align="right">금액</TableCell>
                       <TableCell>구분</TableCell>
                       <TableCell>개인/사업</TableCell>
@@ -430,6 +454,61 @@ export function ImportCsvDialog({ open, wallets, categories, tags, onClose, onIm
                                 .join(" ")}
                             </Typography>
                           )}
+                        </TableCell>
+                        <TableCell>
+                          <TextField
+                            size="small"
+                            placeholder="메모"
+                            value={row.memo ?? ""}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setRows((current) =>
+                                current.map((item) =>
+                                  item.row_no === row.row_no
+                                    ? { ...item, memo: value.trim() === "" ? null : value }
+                                    : item,
+                                ),
+                              );
+                            }}
+                            sx={{ minWidth: 120 }}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Select
+                            size="small"
+                            displayEmpty
+                            value={row.payment_account_id === null ? "" : String(row.payment_account_id)}
+                            onChange={(event) => {
+                              const value = String(event.target.value);
+                              const wallet =
+                                value === ""
+                                  ? null
+                                  : activeWallets.find((item) => String(item.id) === value) ?? null;
+                              setRows((current) =>
+                                current.map((item) =>
+                                  item.row_no === row.row_no
+                                    ? {
+                                        ...item,
+                                        payment_account_id: wallet === null ? null : wallet.id,
+                                        payment_account_name: wallet === null ? item.payment_account_name : wallet.name,
+                                      }
+                                    : item,
+                                ),
+                              );
+                            }}
+                            sx={{ minWidth: 140 }}
+                          >
+                            <MenuItem value="">
+                              {row.payment_account_id === null && row.payment_account_name
+                                ? `${row.payment_account_name} (없음)`
+                                : "선택"}
+                            </MenuItem>
+                            {activeWallets.map((wallet) => (
+                              <MenuItem key={wallet.id} value={String(wallet.id)}>
+                                {wallet.name}
+                              </MenuItem>
+                            ))}
+                          </Select>
                         </TableCell>
                         <TableCell align="right">
                           {row.amount !== null ? formatWonWithSymbol(row.amount) : "—"}

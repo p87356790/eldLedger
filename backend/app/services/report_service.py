@@ -180,7 +180,7 @@ class ReportService:
         _set_widths(sheet, [22, 28])
 
     def _write_transactions(self, sheet: Worksheet, transactions: list[Transaction]) -> None:
-        headers = ["날짜", "유형", "구분", "금액", "결제계정ID", "메모"]
+        headers = ["날짜", "유형", "구분", "금액", "결제계정ID", "사용처", "메모"]
         _write_header(sheet, headers)
         for row_index, transaction in enumerate(transactions, start=2):
             amount = self._ledger.reported_business_amount(transaction)
@@ -190,10 +190,11 @@ class ReportService:
                 SCOPE_LABELS[transaction.scope],
                 amount,
                 transaction.payment_account_id,
+                transaction.merchant or "",
                 transaction.memo or "",
             ]
             _write_row(sheet, row_index, values, money_cols={4})
-        _set_widths(sheet, [14, 10, 10, 16, 14, 40])
+        _set_widths(sheet, [14, 10, 10, 16, 14, 24, 40])
 
     def _write_journal(self, sheet: Worksheet, entries: list[JournalBookEntry]) -> None:
         headers = ["날짜", "분개ID", "적요", "계정코드", "계정", "차변", "대변"]

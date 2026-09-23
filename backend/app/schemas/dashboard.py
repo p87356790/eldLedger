@@ -36,15 +36,29 @@ class DashboardTransactionRow(BaseModel):
     id: int
     occurred_on: date
     amount: int
+    signed_amount: int
     transaction_type: TransactionType
     scope: Scope
     category_name: str | None
     payment_method: str
+    merchant: str | None
     memo: str | None
     has_attachment: bool
+
+
+class DashboardCategoryTotal(BaseModel):
+    category_id: int | None
+    name: str
+    transaction_type: TransactionType
+    current_amount: int
+    previous_amount: int
+    sort_order: int
 
 
 class DashboardSummaryResponse(BaseModel):
     summary: DashboardPeriodSummary
     daily: list[DashboardDailyAggregate]
     transactions: list[DashboardTransactionRow]
+    previous_start_date: date
+    previous_end_date: date
+    category_totals: list[DashboardCategoryTotal]

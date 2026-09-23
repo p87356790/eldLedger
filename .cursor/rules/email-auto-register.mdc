@@ -1,0 +1,304 @@
+---
+description: eldLedger 이메일 자동 거래 등록 기능 - 설계 및 구현 가이드
+globs: backend/app/services/email_*.py,backend/app/routers/email_*.py,backend/app/models/email_*.py,frontend/src/components/EmailSettings*.tsx
+alwaysApply: false
+---
+
+# 이메일 자동 거래 등록 (Email Auto-Register)
+
+이메일 수신함을 주기적으로 확인하여, 특정 제목(Subject)의 이메일을 파싱하고
+거래를 자동 등록하는 기능.
+
+---
+
+## 1. 기능 요약
+
+| 항목 | 설명 |
+|------|------|
+| 프로토콜 | IMAP (수신 전용, SSL/TLS) |
+| 폴링 주기 | 설정 가능 (기본 5분) |
+| 트리거 | Subject가 사용자 설정 키워드와 일치 |
+| 파싱 대상 | 이메일 본문 (plain text 우선) |
+| 첨부파일 | 이미지/PDF → 영수증(Attachment)으로 등록 |
+| 유저 범위 | 유저별 개별 이메일 설정 (owner_user_id 기준) |
+
+---
+
+## 2. 이메일 본문 형식 (파싱 규칙)
+
+사용자가 이메일 본문에 아래 키-값 쌍을 작성하면 파싱한다.
+한 줄에 하나씩, `키: 값` 또는 `키=값` 형식.
+
+### 필수 필드
+
+| 키 (한글) | 키 (영문 대안) | 설명 | 예시 |
+|-----------|----------------|------|------|
+| 금액 | amount | 거래 금액 (원 단위 정수, 콤마 허용) | `금액: 45,000` |
+| 유형 | type | INCOME / EXPENSE / TRANSFER | `유형: 지출` |
+
+### 선택 필드
+
+| 키 (한글) | 키 (영문 대안) | 설명 | 기본값 |
+|-----------|----------------|------|--------|
+| 날짜 | date | 거래 발생일 (YYYY-MM-DD) | 이메일 수신일 |
+| 사용처 | memo | 거래 메모 | Subject에서 추출 |
+| 결제수단 | wallet / account | 자산(지갑) 이름 | 사용자 기본 결제수단 |
+| 분류 | category | 분류 이름 | 자동분류 규칙 매칭 또는 미지정 |
+| 구분 | scope | PERSONAL / BUSINESS | 분류의 default_scope |
+| 이체대상 | transfer_to | 이체 상대 자산 이름 (TRANSFER 시) | - |
+| 태그 | tags | 쉼표 구분 태그 이름들 | 없음 |
+
+### 유형 매핑 (한글 → enum)
+
+| 한글 입력 | TransactionType |
+|-----------|-----------------|
+| 수입, 입금, income | INCOME |
+| 지출, 출금, expense | EXPENSE |
+| 이체, transfer | TRANSFER |
+
+### 구분 매핑 (한글 → enum)
+
+| 한글 입력 | Scope |
+|-----------|-------|
+| 개인, personal | PERSONAL |
+| 사업, business | BUSINESS |
+
+### 파싱 예시 (이메일 본문)
+
+```
+금액: 45,000
+유형: 지출
+결제수단: 카카오뱅크
+분류: 식비
+사용처: 점심 회식
+구분: 사업
+태그: 팀회식, 9월
+```
+
+→ 생성되는 거래:
+- transaction_type=EXPENSE, amount=45000, scope=BUSINESS
+- payment_account: "카카오뱅크" 이름 매칭
+- category: "식비" 이름 매칭
+- memo: "점심 회식"
+- tags: ["팀회식", "9월"]
+- occurred_on: 이메일 수신일
+
+---
+
+## 3. DB 모델
+
+### EmailInboxConfig (유저별 이메일 설정)
+
+```python
+class EmailInboxConfig(IntPKMixin, TimestampMixin, Base):
+    __tablename__ = "email_inbox_configs"
+    __table_args__ = (UniqueConstraint("owner_user_id"),)
+
+    organization_id: int  # FK → organizations.id
+    owner_user_id: int    # FK → users.id (1:1)
+    imap_host: str        # 예: imap.gmail.com
+    imap_port: int        # 기본 993
+    imap_use_ssl: bool    # 기본 True
+    email_address: str    # 로그인 이메일
+    email_password: str   # 앱 비밀번호 (암호화 저장)
+    subject_keyword: str  # 매칭할 Subject 키워드 (예: "[가계부]")
+    default_wallet_id: int | None  # FK → accounts.id (기본 결제수단)
+    poll_interval_minutes: int  # 기본 5
+    is_active: bool       # 활성화 여부
+    last_checked_at: datetime | None  # 마지막 확인 시각
+    last_uid: str | None  # 마지막 처리한 이메일 UID
+```
+
+### EmailImportLog (처리 이력)
+
+```python
+class EmailImportLog(IntPKMixin, TimestampMixin, Base):
+    __tablename__ = "email_import_logs"
+
+    config_id: int       # FK → email_inbox_configs.id
+    email_uid: str       # IMAP UID
+    email_subject: str
+    email_date: datetime
+    status: str          # "SUCCESS" | "PARSE_ERROR" | "REGISTER_ERROR" | "SKIPPED"
+    transaction_id: int | None  # FK → transactions.id (성공 시)
+    error_message: str | None
+```
+
+---
+
+## 4. 백엔드 구조
+
+### 계층 (Clean Architecture)
+
+```
+routers/email_config.py       ← API 엔드포인트 (설정 CRUD + 수동 체크)
+services/email_poll_service.py ← IMAP 접속, Subject 필터, 본문 파싱
+services/email_register_service.py ← 파싱 결과 → TransactionCreate 변환 → 거래 생성
+repositories/email_repository.py   ← EmailInboxConfig, EmailImportLog CRUD
+schemas/email.py               ← Pydantic 스키마
+```
+
+### API 엔드포인트
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/email/config` | 현재 유저의 이메일 설정 조회 |
+| PUT | `/api/v1/email/config` | 이메일 설정 생성/수정 |
+| DELETE | `/api/v1/email/config` | 이메일 설정 삭제 |
+| POST | `/api/v1/email/config/test` | 연결 테스트 (IMAP 로그인만 확인) |
+| POST | `/api/v1/email/check` | 수동 즉시 확인 (폴링 1회 실행) |
+| GET | `/api/v1/email/logs` | 처리 이력 조회 (페이지네이션) |
+
+### 핵심 서비스 로직
+
+```
+EmailPollService.poll(config: EmailInboxConfig):
+  1. IMAP 접속 (config.imap_host, port, ssl)
+  2. INBOX 선택
+  3. SEARCH (UNSEEN SINCE last_checked_at SUBJECT "keyword")
+  4. 새 메일 각각에 대해:
+     a. Subject에 keyword 포함 확인
+     b. 본문 파싱 → ParsedTransaction
+     c. 첨부파일 추출 → list[AttachmentData]
+     d. EmailRegisterService.register(parsed, attachments)
+     e. EmailImportLog 기록
+     f. 메일에 SEEN 플래그
+  5. config.last_checked_at, last_uid 갱신
+```
+
+### 자동 폴링 (백그라운드)
+
+```python
+# app/tasks/email_poller.py
+# asyncio.create_task 또는 BackgroundTasks로 구현
+# 앱 시작 시 활성 config를 로드하여 poll_interval_minutes 간격으로 실행
+# APScheduler 또는 단순 asyncio loop 사용
+
+async def email_poll_loop():
+    while True:
+        configs = repo.list_active_configs()
+        for config in configs:
+            try:
+                await poll_service.poll(config)
+            except Exception:
+                log.exception("이메일 폴링 실패: %s", config.email_address)
+        await asyncio.sleep(60)  # 1분마다 활성 설정 확인
+```
+
+---
+
+## 5. 보안 고려
+
+| 항목 | 방법 |
+|------|------|
+| 이메일 비밀번호 저장 | Fernet 대칭 암호화 (SECRET_KEY 기반) |
+| Gmail 사용 시 | 앱 비밀번호(App Password) 안내 표시 |
+| IMAP 접속 | SSL/TLS 강제 (993 포트 기본) |
+| 비밀번호 API 응답 | 마스킹 (`"****"`) 으로 반환, 빈 문자열이면 기존 값 유지 |
+
+---
+
+## 6. 프론트엔드
+
+### 설정 탭 추가
+
+`nav.ts`의 `SETTINGS_NAV`에 추가:
+```
+{ path: "/settings/email", label: "이메일 자동 등록", adminOnly: false }
+```
+
+### EmailSettingsPage 컴포넌트 구성
+
+```
+┌─────────────────────────────────────────────┐
+│ 이메일 자동 등록                              │
+│ 이메일 수신함을 확인하여 거래를 자동 등록합니다.  │
+├─────────────────────────────────────────────┤
+│ [활성화 토글]                                │
+│                                             │
+│ IMAP 서버 설정                               │
+│ ┌─────────────┐ ┌──────┐ ☑ SSL              │
+│ │ imap.gmail.com │ │ 993  │                  │
+│ └─────────────┘ └──────┘                    │
+│                                             │
+│ 이메일 계정                                  │
+│ ┌─────────────────┐                         │
+│ │ user@gmail.com   │                        │
+│ └─────────────────┘                         │
+│ 비밀번호 (앱 비밀번호)                        │
+│ ┌─────────────────┐                         │
+│ │ ●●●●●●●●         │                        │
+│ └─────────────────┘                         │
+│                                             │
+│ 제목 키워드                                  │
+│ ┌─────────────────┐                         │
+│ │ [가계부]          │  ← Subject에 포함 시 처리│
+│ └─────────────────┘                         │
+│                                             │
+│ 기본 결제수단                                │
+│ ┌─────────────────┐                         │
+│ │ ▼ 카카오뱅크      │                        │
+│ └─────────────────┘                         │
+│                                             │
+│ 확인 주기: [5]분                             │
+│                                             │
+│ [연결 테스트]  [저장]                         │
+├─────────────────────────────────────────────┤
+│ [지금 확인하기]                               │
+│                                             │
+│ 최근 처리 이력                                │
+│ ┌──────┬──────────┬────┬──────┐             │
+│ │ 시각  │ 제목     │상태│ 금액  │             │
+│ ├──────┼──────────┼────┼──────┤             │
+│ │ 09:30│ [가계부] │ ✓ │45,000│              │
+│ │ 09:15│ [가계부] │ ✗ │ -    │ 파싱 오류     │
+│ └──────┴──────────┴────┴──────┘             │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## 7. 구현 순서 (권장)
+
+1. **DB 마이그레이션**: `email_inbox_configs`, `email_import_logs` 테이블
+2. **스키마**: `schemas/email.py` (Pydantic 모델)
+3. **리포지토리**: `repositories/email_repository.py`
+4. **본문 파서**: `services/email_poll_service.py` 내 `parse_email_body()` — 키-값 파싱 + 한글 매핑
+5. **거래 등록**: `services/email_register_service.py` — 이름→ID 매칭, TransactionCreate 생성
+6. **IMAP 폴링**: `services/email_poll_service.py` — imaplib 사용, Subject 필터
+7. **API**: `routers/email_config.py` — 설정 CRUD + 수동 체크 + 이력
+8. **백그라운드 태스크**: `tasks/email_poller.py` — 주기적 폴링 루프
+9. **프론트엔드**: `EmailSettingsPage.tsx` + API 클라이언트 함수
+10. **테스트**: 파서 단위 테스트, 서비스 통합 테스트
+
+---
+
+## 8. 의존성
+
+```
+# 추가 패키지 불필요 — Python 표준 라이브러리 사용
+# imaplib (IMAP 접속)
+# email (이메일 파싱)
+# cryptography (Fernet 암호화, 이미 설치되어 있으면 재활용)
+```
+
+`cryptography`가 없으면 `pip install cryptography` 추가.
+
+---
+
+## 9. 참고: Gmail 앱 비밀번호 안내 문구
+
+프론트엔드 설정 페이지에 다음 안내를 표시:
+
+> Gmail을 사용하는 경우, Google 계정 → 보안 → 2단계 인증 활성화 후
+> "앱 비밀번호"를 생성하여 입력하세요. 일반 비밀번호로는 접속되지 않습니다.
+> IMAP 서버: `imap.gmail.com` / 포트: `993` / SSL: 사용
+
+---
+
+## 10. 제약 사항
+
+- 거래 등록 실패 시 해당 이메일은 `PARSE_ERROR` 또는 `REGISTER_ERROR`로 로그에 남기고 건너뜀
+- 동일 UID 이메일은 중복 처리하지 않음 (EmailImportLog로 추적)
+- IMAP IDLE(push) 미지원 — 폴링 방식만 사용 (단순성 우선)
+- 이메일 삭제/이동은 하지 않음 — SEEN 플래그만 설정

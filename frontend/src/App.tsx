@@ -56,21 +56,18 @@ function App() {
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState<boolean>(false);
-  const [idleLogout, setIdleLogout] = useState<boolean>(false);
 
   const enterApp = useCallback((user: AuthUser): void => {
     markActivity();
-    setIdleLogout(false);
     setCurrentUser(user);
     setBoot("ready");
   }, []);
 
-  const handleLogout = useCallback(async (reason: "manual" | "idle" = "manual"): Promise<void> => {
+  const handleLogout = useCallback(async (): Promise<void> => {
     await logout();
     clearLastActivity();
     clearSession();
     setCurrentUser(null);
-    setIdleLogout(reason === "idle");
     setBoot("login");
   }, []);
 
@@ -120,7 +117,6 @@ function App() {
           await logout();
           clearLastActivity();
           if (!cancelled) {
-            setIdleLogout(true);
             setBoot("login");
           }
           return;
@@ -166,7 +162,7 @@ function App() {
   }, [boot, refresh]);
 
   useIdleLogout(boot === "ready", () => {
-    void handleLogout("idle");
+    void handleLogout();
   });
 
   useEffect(() => {
@@ -189,7 +185,7 @@ function App() {
     return <SetupPage organizationName={setupOrgName} onReady={enterApp} />;
   }
   if (boot === "login" || currentUser === null) {
-    return <LoginPage onReady={enterApp} idleLogout={idleLogout} />;
+    return <LoginPage onReady={enterApp} />;
   }
 
   return (
@@ -238,7 +234,10 @@ function App() {
             path="rules"
             element={<AutoRulesPage categories={categories} tags={tags} wallets={wallets} loadError={loadError} />}
           />
-          <Route path="backup" element={<DataBackupPage onImported={refresh} />} />
+          <Route
+            path="backup"
+            element={<DataBackupPage isAdmin={currentUser.role === "ADMIN"} onImported={refresh} />}
+          />
           <Route
             path="profile"
             element={
@@ -251,6 +250,7 @@ function App() {
                   setSetupOrgName("내 장부");
                   setBoot("setup");
                 }}
+                onLedgerReset={refresh}
               />
             }
           />

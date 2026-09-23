@@ -1,3 +1,6 @@
+import zipfile
+from io import BytesIO
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -133,6 +136,13 @@ def test_export_and_import_restores_ledger(client: TestClient, db_session: Sessi
     assert exported.status_code == 200, exported.text
     assert exported.headers["content-type"].startswith("application/zip")
     backup = exported.content
+    with zipfile.ZipFile(BytesIO(backup)) as archive:
+        receipt_names = [
+            name for name in archive.namelist() if name.startswith("attachments/") and not name.endswith("/")
+        ]
+        assert len(receipt_names) == 1
+        assert receipt_names[0].startswith("attachments/2026-09/")
+        assert receipt_names[0].endswith(".jpg")
 
     conflict = client.post("/api/v1/backup/import", files={"file": ("backup.zip", backup, "application/zip")})
     assert conflict.status_code == 409
@@ -167,6 +177,53 @@ def test_export_and_import_restores_ledger(client: TestClient, db_session: Sessi
     assert trial["is_balanced"] is True
 
 
+def test_config_import_succeeds_when_auto_rules_exist(client: TestClient, db_session: Session) -> None:
+    organization = _seed(db_session)
+    wallets = _wallets(client, organization.id)
+    categories = _categories(client, organization.id)
+
+    exported = client.get("/api/v1/backup/config/export")
+    assert exported.status_code == 200, exported.text
+
+    created_rule = client.post(
+        "/api/v1/import/rules",
+        json={
+            "name": "스타벅스",
+            "merchant_keyword": "스타벅스",
+            "payment_account_id": wallets["CASH"]["id"],
+            "category_id": categories["식비"]["id"],
+            "scope": "PERSONAL",
+        },
+    )
+    assert created_rule.status_code == 201, created_rule.text
+
+    import json
+
+    restored = client.post(
+        "/api/v1/backup/config/import",
+        files={"file": ("config.json", json.dumps(exported.json()).encode(), "application/json")},
+    )
+    assert restored.status_code == 200, restored.text
+    after = _categories(client, organization.id)
+    assert "식비" in after
+    rules = client.get("/api/v1/import/rules").json()
+    assert rules == []
+
+
+def test_config_import_accepts_utf8_bom(client: TestClient, db_session: Session) -> None:
+    _seed(db_session)
+    exported = client.get("/api/v1/backup/config/export")
+    assert exported.status_code == 200, exported.text
+    import json
+
+    body = b"\xef\xbb\xbf" + json.dumps(exported.json()).encode("utf-8")
+    restored = client.post(
+        "/api/v1/backup/config/import",
+        files={"file": ("config.json", body, "application/json")},
+    )
+    assert restored.status_code == 200, restored.text
+
+
 def test_import_rejects_unknown_file(client: TestClient, db_session: Session) -> None:
     _seed(db_session)
     response = client.post(
@@ -174,3 +231,82 @@ def test_import_rejects_unknown_file(client: TestClient, db_session: Session) ->
         files={"file": ("notes.txt", b"hello", "text/plain")},
     )
     assert response.status_code == 400
+
+
+def test_config_export_and_import_replaces_wallets_and_categories(
+    client: TestClient, db_session: Session,
+) -> None:
+    organization = _seed(db_session)
+    wallets = _wallets(client, organization.id)
+    categories = _categories(client, organization.id)
+    assert len(wallets) > 0
+    assert len(categories) > 0
+
+    exported = client.get("/api/v1/backup/config/export")
+    assert exported.status_code == 200, exported.text
+    config_json = exported.json()
+    assert config_json["format"] == "eldledger-config"
+    assert len(config_json["wallets"]) == len(wallets)
+    assert len(config_json["categories"]) == len(categories)
+
+    extra_cat = client.post(
+        "/api/v1/categories",
+        json={
+            "organization_id": organization.id,
+            "name": "임시분류",
+            "transaction_type": "EXPENSE",
+            "default_scope": "PERSONAL",
+            "account_id": categories["통신"]["account_id"],
+        },
+    )
+    assert extra_cat.status_code == 201, extra_cat.text
+    assert len(_categories(client, organization.id)) == len(categories) + 1
+
+    import json
+    restored = client.post(
+        "/api/v1/backup/config/import",
+        files={"file": ("config.json", json.dumps(config_json).encode(), "application/json")},
+    )
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["categories_deleted"] == len(categories) + 1
+    assert body["categories_created"] >= len(categories)
+    assert body["wallets_created"] >= len(wallets)
+
+    after = _categories(client, organization.id)
+    assert "임시분류" not in after
+    assert "식비" in after
+
+
+def test_config_import_blocked_when_transactions_exist(
+    client: TestClient, db_session: Session,
+) -> None:
+    organization = _seed(db_session)
+    wallets = _wallets(client, organization.id)
+    categories = _categories(client, organization.id)
+
+    _post_tx(
+        client,
+        {
+            "organization_id": organization.id,
+            "occurred_on": "2026-09-01",
+            "transaction_type": "EXPENSE",
+            "scope": "PERSONAL",
+            "amount": 10_000,
+            "payment_account_id": wallets["CASH"]["id"],
+            "items": [
+                {"category_id": categories["식비"]["id"], "amount": 10_000, "scope": "PERSONAL", "line_no": 1}
+            ],
+        },
+    )
+
+    exported = client.get("/api/v1/backup/config/export")
+    assert exported.status_code == 200
+
+    import json
+    result = client.post(
+        "/api/v1/backup/config/import",
+        files={"file": ("config.json", json.dumps(exported.json()).encode(), "application/json")},
+    )
+    assert result.status_code == 400
+    assert "거래가" in result.json()["detail"]

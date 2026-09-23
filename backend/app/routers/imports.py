@@ -37,7 +37,7 @@ def list_profiles(
 @router.post("/preview", response_model=ImportPreviewResponse)
 async def preview_import(
     file: UploadFile = File(...),
-    account_id: int = Form(...),
+    account_id: int | None = Form(default=None),
     organization_id: int | None = Form(default=None),
     profile_id: int | None = Form(default=None),
     user: User = Depends(get_current_user),

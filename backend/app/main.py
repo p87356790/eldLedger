@@ -1,5 +1,6 @@
-from contextlib import asynccontextmanager
+import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
@@ -20,6 +21,7 @@ from app.routers import tags as tags_router
 from app.routers import transactions as transactions_router
 from app.routers import users as users_router
 from app.security.deps import get_current_user
+from app.tasks.backup_scheduler import backup_scheduler_loop
 
 
 def _ensure_data_directories() -> None:
@@ -32,7 +34,16 @@ def _ensure_data_directories() -> None:
 async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
     _ensure_data_directories()
     init_db()
-    yield
+    stop = asyncio.Event()
+    scheduler_task: asyncio.Task[None] | None = None
+    if settings.backup_scheduler_enabled:
+        scheduler_task = asyncio.create_task(backup_scheduler_loop(stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        if scheduler_task is not None:
+            await scheduler_task
 
 
 def create_app() -> FastAPI:

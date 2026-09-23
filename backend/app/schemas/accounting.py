@@ -144,6 +144,7 @@ class TransactionCreate(BaseModel):
     transaction_type: TransactionType
     scope: Scope
     amount: int = Field(..., gt=0)
+    merchant: str | None = Field(default=None, max_length=255)
     memo: str | None = None
     payment_account_id: int
     transfer_account_id: int | None = None
@@ -171,6 +172,7 @@ class TransactionUpdate(BaseModel):
     transaction_type: TransactionType
     scope: Scope
     amount: int = Field(..., gt=0)
+    merchant: str | None = Field(default=None, max_length=255)
     memo: str | None = None
     payment_account_id: int
     transfer_account_id: int | None = None
@@ -218,6 +220,7 @@ class TransactionRead(ORMModel):
     transaction_type: TransactionType
     scope: Scope
     amount: int
+    merchant: str | None
     memo: str | None
     status: RecordStatus
     payment_account_id: int
@@ -230,6 +233,22 @@ class TransactionRead(ORMModel):
 class TransactionListResponse(BaseModel):
     total: int
     items: list[TransactionRead]
+
+
+class DuplicateCheckRequest(BaseModel):
+    organization_id: int
+    occurred_on: date
+    transaction_type: TransactionType
+    amount: int = Field(..., gt=0)
+    merchant: str | None = Field(default=None, max_length=255)
+    payment_account_id: int
+    transfer_account_id: int | None = None
+    items: list[TransactionItemCreate] = Field(default_factory=list)
+    exclude_id: int | None = Field(default=None, ge=1)
+
+
+class DuplicateCheckResponse(BaseModel):
+    matches: list[TransactionRead] = Field(default_factory=list)
 
 
 class JournalLineCreate(BaseModel):

@@ -7,17 +7,28 @@ import shutil
 import sys
 from pathlib import Path
 
-from sqlalchemy import text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
-from app.db.init_db import seed_standard_data
-from app.models import Account, Category, Organization
+from app.db.init_db import STANDARD_ACCOUNTS, seed_standard_data
+from app.models import (
+    Account,
+    AutoCategoryRule,
+    Category,
+    Organization,
+    Tag,
+    Transaction,
+    User,
+)
 from app.models.base import Base
+from app.models.journal import JournalEntry, JournalLine
+from app.services.chart_template_service import ChartTemplateService
 
 CONFIRM_PHRASE = "초기화"
 PROTECTED_TABLES = frozenset({"alembic_version"})
+STANDARD_WALLET_CODES = frozenset(seed.code for seed in STANDARD_ACCOUNTS if seed.instrument_kind is not None)
 
 
 def _empty_directory(path: Path) -> None:
@@ -34,6 +45,121 @@ def clear_generated_files() -> None:
     data_root = Path(settings.data_dir)
     _empty_directory(data_root / "uploads")
     _empty_directory(data_root / "reports")
+
+
+def reset_user_ledger(session: Session, user: User) -> int:
+    """Wipe one user's cashbook and restore that user's standard wallets/categories.
+
+    Login accounts and other users' ledgers are left alone.
+    """
+    transactions = list(
+        session.scalars(
+            select(Transaction)
+            .options(
+                selectinload(Transaction.attachments),
+                selectinload(Transaction.journal_entries),
+            )
+            .where(Transaction.created_by_user_id == user.id)
+        )
+    )
+    tx_count = len(transactions)
+    data_root = Path(settings.data_dir)
+    for transaction in transactions:
+        for attachment in transaction.attachments:
+            stored = data_root / attachment.stored_path
+            if stored.is_file():
+                stored.unlink(missing_ok=True)
+
+    entry_ids = [entry.id for transaction in transactions for entry in transaction.journal_entries]
+    wallets = list(
+        session.scalars(
+            select(Account).where(
+                Account.organization_id == user.organization_id,
+                Account.owner_user_id == user.id,
+                Account.instrument_kind.is_not(None),
+            )
+        )
+    )
+    wallet_ids = [wallet.id for wallet in wallets]
+    if wallet_ids:
+        opening_ids = list(
+            session.scalars(
+                select(JournalEntry.id)
+                .join(JournalLine)
+                .where(JournalEntry.transaction_id.is_(None))
+                .where(JournalLine.account_id.in_(wallet_ids))
+            ).unique()
+        )
+        entry_ids.extend(opening_ids)
+    entry_ids = list(dict.fromkeys(entry_ids))
+    if entry_ids:
+        session.execute(update(JournalEntry).where(JournalEntry.id.in_(entry_ids)).values(reverses_entry_id=None))
+        session.execute(
+            update(JournalLine).where(JournalLine.journal_entry_id.in_(entry_ids)).values(transaction_item_id=None)
+        )
+        session.flush()
+        session.execute(delete(JournalLine).where(JournalLine.journal_entry_id.in_(entry_ids)))
+        session.flush()
+        session.execute(delete(JournalEntry).where(JournalEntry.id.in_(entry_ids)))
+        session.flush()
+
+    for transaction in transactions:
+        session.delete(transaction)
+    session.flush()
+
+    rules = list(
+        session.scalars(
+            select(AutoCategoryRule).where(
+                AutoCategoryRule.organization_id == user.organization_id,
+                AutoCategoryRule.owner_user_id == user.id,
+            )
+        )
+    )
+    for rule in rules:
+        session.delete(rule)
+    session.flush()
+
+    categories = list(
+        session.scalars(
+            select(Category).where(
+                Category.organization_id == user.organization_id,
+                Category.owner_user_id == user.id,
+            )
+        )
+    )
+    for category in categories:
+        category.parent_id = None
+    session.flush()
+    for category in categories:
+        session.delete(category)
+    session.flush()
+
+    tags = list(
+        session.scalars(
+            select(Tag).where(
+                Tag.organization_id == user.organization_id,
+                Tag.owner_user_id == user.id,
+            )
+        )
+    )
+    for tag in tags:
+        session.delete(tag)
+    session.flush()
+
+    for wallet in wallets:
+        wallet.settlement_account_id = None
+        wallet.opening_balance = 0
+        wallet.is_active = True
+    session.flush()
+    for wallet in wallets:
+        if wallet.code in STANDARD_WALLET_CODES:
+            continue
+        session.delete(wallet)
+    session.flush()
+
+    ChartTemplateService(session).provision_user_ledger(user)
+    session.flush()
+    return tx_count
 
 
 def reset_all_data(session: Session) -> Organization:

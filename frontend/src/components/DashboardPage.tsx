@@ -54,6 +54,9 @@ import {
 } from "../utils/dates";
 import { formatWon, formatWonWithSymbol } from "../utils/money";
 import { KIND_LABEL, KIND_ORDER, groupWallets } from "../utils/wallets";
+import { ReceiptViewerDialog } from "./ReceiptViewerDialog";
+import type { ReceiptViewerTarget } from "./ReceiptViewerDialog";
+import { CategoryCompareCard } from "./CategoryCompareCard";
 import { TransactionEditDialog } from "./TransactionEditDialog";
 
 interface DashboardPageProps {
@@ -90,16 +93,6 @@ function formatSignedWon(amount: number): string {
   return formatWonWithSymbol(0);
 }
 
-function amountColor(type: DashboardTransactionRow["transaction_type"]): string {
-  if (type === "INCOME") {
-    return "success.main";
-  }
-  if (type === "EXPENSE") {
-    return "error.main";
-  }
-  return "primary.main";
-}
-
 export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }: DashboardPageProps) {
   const theme = useTheme();
   const compact = useMediaQuery(theme.breakpoints.down("sm"));
@@ -115,8 +108,14 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [receiptTarget, setReceiptTarget] = useState<ReceiptViewerTarget | null>(null);
 
-  const groupedWallets = useMemo(() => groupWallets(wallets.filter((wallet) => wallet.is_active)), [wallets]);
+  const activeWallets = useMemo(() => wallets.filter((wallet) => wallet.is_active), [wallets]);
+  const groupedWallets = useMemo(() => groupWallets(activeWallets), [activeWallets]);
+  const orderedWallets = useMemo(
+    () => KIND_ORDER.flatMap((kind) => groupedWallets[kind]),
+    [groupedWallets],
+  );
 
   const loadSummary = useCallback(async (): Promise<void> => {
     try {
@@ -171,7 +170,7 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
   const selectedRows = selectedDate == null ? [] : (transactionsByDate.get(selectedDate) ?? []);
   const cells = buildMonthCells(year, month);
   const summary = data?.summary;
-  const totalAssets = wallets.filter((wallet) => wallet.is_active).reduce((sum, wallet) => sum + wallet.current_balance, 0);
+  const totalAssets = activeWallets.reduce((sum, wallet) => sum + wallet.current_balance, 0);
 
   const handleSaved = async (): Promise<void> => {
     await onRefresh();
@@ -337,9 +336,6 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
           color={(summary?.business_profit ?? 0) >= 0 ? "primary.main" : "error.main"}
         />
       </Box>
-      <Typography color="text.secondary" sx={{ px: 0.5 }}>
-        전체 자산 {formatWonWithSymbol(totalAssets)}
-      </Typography>
 
       {view === "calendar" ? (
         <Card>
@@ -404,6 +400,14 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
                         -{formatWon(daily.total_expense)}
                       </Typography>
                     )}
+                    {daily != null &&
+                      daily.transaction_count > 0 &&
+                      daily.total_income === 0 &&
+                      daily.total_expense === 0 && (
+                        <Typography sx={{ fontSize: { xs: "0.62rem", sm: "0.75rem" }, color: "primary.main", fontWeight: 700 }}>
+                          이체
+                        </Typography>
+                      )}
                   </Box>
                 );
               })}
@@ -426,6 +430,7 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
                   <TransactionRows
                     rows={transactionsByDate.get(iso) ?? []}
                     onOpen={(id) => setEditingId(id)}
+                    onOpenReceipts={(id) => setReceiptTarget({ kind: "saved", transactionId: id })}
                   />
                 </CardContent>
               </Card>
@@ -433,6 +438,75 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
           )}
         </Stack>
       )}
+
+      <Card>
+        <CardContent sx={{ p: { xs: 2, sm: 2.5 } }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="baseline" gap={1} sx={{ mb: 1.5 }}>
+            <Typography sx={{ fontWeight: 800 }}>자산별 잔액</Typography>
+            <Typography color="text.secondary" sx={{ fontWeight: 700 }}>
+              전체 {formatWonWithSymbol(totalAssets)}
+            </Typography>
+          </Stack>
+          {orderedWallets.length === 0 ? (
+            <Typography color="text.secondary">아직 등록된 자산이 없어요.</Typography>
+          ) : (
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: { xs: "1fr 1fr", sm: "1fr 1fr 1fr", md: "repeat(4, 1fr)" },
+                gap: 1,
+              }}
+            >
+              {orderedWallets.map((wallet) => {
+                const selected = accountId === wallet.id;
+                const balanceColor =
+                  wallet.current_balance > 0
+                    ? "text.primary"
+                    : wallet.current_balance < 0
+                      ? "error.main"
+                      : "text.secondary";
+                return (
+                  <Box
+                    key={wallet.id}
+                    component="button"
+                    type="button"
+                    onClick={() => setAccountId(selected ? "all" : wallet.id)}
+                    sx={{
+                      display: "block",
+                      p: 1.25,
+                      borderRadius: 1.5,
+                      border: "1px solid",
+                      borderColor: selected ? "primary.main" : "divider",
+                      bgcolor: selected ? "action.selected" : "background.paper",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      font: "inherit",
+                    }}
+                  >
+                    <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
+                      {KIND_LABEL[wallet.instrument_kind]}
+                    </Typography>
+                    <Typography sx={{ fontWeight: 700 }} noWrap>
+                      {wallet.name}
+                    </Typography>
+                    <Typography sx={{ fontWeight: 800, mt: 0.25, color: balanceColor }}>
+                      {formatWonWithSymbol(wallet.current_balance)}
+                    </Typography>
+                  </Box>
+                );
+              })}
+            </Box>
+          )}
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1.25 }}>
+            자산을 누르면 그 자산의 수입·지출만 보여 줍니다. 다시 누르면 전체로 돌아갑니다.
+          </Typography>
+        </CardContent>
+      </Card>
+
+      <CategoryCompareCard
+        totals={data?.category_totals ?? []}
+        previousStartDate={data?.previous_start_date ?? startDate}
+      />
 
       <Drawer
         anchor={compact ? "bottom" : "right"}
@@ -457,7 +531,11 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
           {selectedRows.length === 0 ? (
             <Typography color="text.secondary">이 날의 기록이 없어요.</Typography>
           ) : (
-            <TransactionRows rows={selectedRows} onOpen={(id) => setEditingId(id)} />
+            <TransactionRows
+              rows={selectedRows}
+              onOpen={(id) => setEditingId(id)}
+              onOpenReceipts={(id) => setReceiptTarget({ kind: "saved", transactionId: id })}
+            />
           )}
         </Box>
       </Drawer>
@@ -470,6 +548,7 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
         onClose={() => setEditingId(null)}
         onSaved={handleSaved}
       />
+      <ReceiptViewerDialog target={receiptTarget} onClose={() => setReceiptTarget(null)} />
     </Stack>
   );
 }
@@ -507,14 +586,19 @@ function SummaryCard({
 function TransactionRows({
   rows,
   onOpen,
+  onOpenReceipts,
 }: {
   rows: DashboardTransactionRow[];
   onOpen: (id: number) => void;
+  onOpenReceipts: (id: number) => void;
 }) {
   return (
     <List disablePadding>
       {rows.map((row, index) => {
-        const prefix = row.transaction_type === "INCOME" ? "+" : row.transaction_type === "EXPENSE" ? "-" : "";
+        const signed = row.signed_amount ?? 0;
+        const prefix = signed > 0 ? "+" : signed < 0 ? "-" : row.transaction_type === "INCOME" ? "+" : row.transaction_type === "EXPENSE" ? "-" : "";
+        const displayAmount = signed !== 0 ? Math.abs(signed) : row.amount;
+        const color = signed > 0 || row.transaction_type === "INCOME" ? "success.main" : signed < 0 || row.transaction_type === "EXPENSE" ? "error.main" : "primary.main";
         return (
           <Box key={row.id}>
             {index > 0 && <Divider />}
@@ -523,11 +607,13 @@ function TransactionRows({
                 primary={
                   <Stack direction="row" justifyContent="space-between" gap={1} alignItems="baseline">
                     <Typography sx={{ fontWeight: 700 }}>
-                      {row.category_name ?? TYPE_LABEL[row.transaction_type]}
+                      {row.merchant?.trim()
+                        ? row.merchant
+                        : (row.category_name ?? TYPE_LABEL[row.transaction_type])}
                     </Typography>
-                    <Typography sx={{ fontWeight: 800, color: amountColor(row.transaction_type) }}>
+                    <Typography sx={{ fontWeight: 800, color }}>
                       {prefix}
-                      {formatWonWithSymbol(row.amount)}
+                      {formatWonWithSymbol(displayAmount)}
                     </Typography>
                   </Stack>
                 }
@@ -541,7 +627,18 @@ function TransactionRows({
                     />
                     {row.payment_method !== "" && <Chip size="small" label={row.payment_method} />}
                     {row.category_name != null && <Chip size="small" variant="outlined" label={row.category_name} />}
-                    {row.has_attachment && <Chip size="small" icon={<ReceiptLongIcon />} label="증빙" />}
+                    {row.has_attachment && (
+                      <Chip
+                        size="small"
+                        color="primary"
+                        icon={<ReceiptLongIcon />}
+                        label="영수증 보기"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpenReceipts(row.id);
+                        }}
+                      />
+                    )}
                     {row.memo != null && row.memo !== "" && (
                       <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center" }}>
                         {row.memo}

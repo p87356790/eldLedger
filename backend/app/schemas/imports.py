@@ -37,6 +37,8 @@ class ImportPreviewRow(BaseModel):
     scope: Scope
     category_id: int | None
     category_name: str | None
+    payment_account_id: int | None = None
+    payment_account_name: str | None = None
     tag_ids: list[int] = Field(default_factory=list)
     suggested: bool = False
     duplicate: bool = False
@@ -67,11 +69,12 @@ class ImportCommitRow(BaseModel):
     category_id: int
     tag_ids: list[int] = Field(default_factory=list)
     skip: bool = False
+    payment_account_id: int | None = None
 
 
 class ImportCommitRequest(BaseModel):
     organization_id: int
-    payment_account_id: int
+    payment_account_id: int | None = None
     rows: list[ImportCommitRow] = Field(..., min_length=1)
 
 

@@ -26,6 +26,12 @@ class FactoryResetRequest(BaseModel):
     confirm: str = Field(..., min_length=1, max_length=20)
 
 
+class LedgerResetResult(BaseModel):
+    transactions_deleted: int
+    user_id: int
+    display_name: str
+
+
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=255)
     password: str = Field(..., min_length=1, max_length=128)
@@ -83,6 +89,11 @@ class ProfileUpdate(BaseModel):
 
 class PasswordChange(BaseModel):
     current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class AdminPasswordSet(BaseModel):
+    admin_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=8, max_length=128)
 
 

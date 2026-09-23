@@ -10,14 +10,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
-from app.models import Attachment, Organization, Transaction, User
+from app.models import Account, Attachment, AutoCategoryRule, Category, Organization, Transaction, User
 from app.models.enums import PaymentInstrumentKind, RecordStatus, TransactionType
+from app.models.journal import JournalLine
 from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
 from app.repositories.import_repository import ImportRepository
 from app.repositories.tag_repository import TagRepository
 from app.schemas.accounting import TransactionCreate, TransactionItemCreate
 from app.schemas.backup import (
+    CONFIG_FORMAT,
+    CONFIG_VERSION,
+    ConfigBundle,
+    ConfigImportResult,
     LEDGER_FORMAT,
     LEDGER_VERSION,
     LedgerAttachment,
@@ -104,6 +109,232 @@ class BackupService:
         )
         return result
 
+    def export_config(self, user: User) -> ConfigBundle:
+        wallets = self._account_repo.list_wallets(user.organization_id, owner_user_id=user.id, include_hidden=True)
+        categories = self._category_repo.list_categories(
+            user.organization_id, owner_user_id=user.id, include_hidden=True,
+        )
+        return ConfigBundle(
+            format=CONFIG_FORMAT,
+            version=CONFIG_VERSION,
+            exported_at=datetime.now(timezone.utc),
+            wallets=[
+                LedgerWallet(
+                    id=w.id, name=w.name,
+                    instrument_kind=w.instrument_kind or PaymentInstrumentKind.OTHER_ASSET,
+                    currency=w.currency, opening_balance=int(w.opening_balance),
+                    institution=w.institution, card_payment_day=w.card_payment_day,
+                    settlement_account_id=w.settlement_account_id,
+                    sort_order=w.sort_order, is_active=w.is_active,
+                )
+                for w in wallets
+            ],
+            categories=[
+                LedgerCategory(
+                    id=c.id, parent_id=c.parent_id, name=c.name,
+                    transaction_type=c.transaction_type, default_scope=c.default_scope,
+                    icon=c.icon, chart_code=c.chart_code or "",
+                    sort_order=c.sort_order, is_active=c.is_active,
+                )
+                for c in categories
+            ],
+        )
+
+    def import_config(self, user: User, bundle: ConfigBundle) -> ConfigImportResult:
+        if bundle.format != CONFIG_FORMAT:
+            raise AccountingError("자산/분류 설정 파일이 아니에요.")
+        if bundle.version != CONFIG_VERSION:
+            raise AccountingError("이 버전의 설정은 아직 가져올 수 없어요.")
+        existing_txns = self._active_transactions(user)
+        if existing_txns:
+            raise AccountingError(
+                f"거래가 {len(existing_txns)}건 있어요. "
+                "기존 거래가 분류·자산을 참조하므로, 먼저 해당 계정의 장부 초기화 후 가져오세요."
+            )
+        self._delete_user_rules(user)
+        cats_deleted = self._delete_all_categories(user)
+        wallets_replaced, wallets_created = self._replace_config_wallets(user, bundle.wallets)
+        cats_created = self._create_config_categories(user, bundle.categories)
+        self._audit.record(
+            action="CONFIG_IMPORT",
+            user_id=user.id,
+            entity_type="config",
+            details=f"자산 {wallets_created}개, 분류 {cats_created}개 가져옴",
+        )
+        return ConfigImportResult(
+            wallets_deleted=wallets_replaced,
+            wallets_created=wallets_created,
+            categories_deleted=cats_deleted,
+            categories_created=cats_created,
+        )
+
+    def _replace_config_wallets(self, user: User, rows: list[LedgerWallet]) -> tuple[int, int]:
+        """Match-and-update existing wallets, create missing ones, deactivate extras.
+
+        Returns (replaced_count, final_count).
+        """
+        existing = list(
+            self._session.scalars(
+                select(Account).where(
+                    Account.organization_id == user.organization_id,
+                    Account.owner_user_id == user.id,
+                    Account.instrument_kind.is_not(None),
+                )
+            )
+        )
+        unused = list(existing)
+        id_map: dict[int, int] = {}
+        ordered = sorted(rows, key=lambda r: (1 if r.instrument_kind == CARD_KIND else 0, r.sort_order, r.id))
+        for row in ordered:
+            found = next(
+                (w for w in unused if w.instrument_kind == row.instrument_kind and w.name == row.name),
+                None,
+            )
+            if found is not None:
+                unused.remove(found)
+                found.sort_order = row.sort_order
+                found.is_active = row.is_active
+                found.institution = row.institution
+                found.currency = row.currency or "KRW"
+                found.opening_balance = row.opening_balance
+                found.card_payment_day = row.card_payment_day
+                id_map[row.id] = found.id
+                continue
+            from app.services.account_service import KIND_PARENT_CODE
+            parent_code = KIND_PARENT_CODE.get(row.instrument_kind)
+            if parent_code is None:
+                continue
+            parent = self._account_repo.get_by_code(user.organization_id, parent_code)
+            if parent is None:
+                raise AccountingError(f"자산 '{row.name}'에 연결된 계정과목({parent_code})이 없어요.")
+            used_codes = {
+                code for code in self._session.scalars(
+                    select(Account.code).where(Account.organization_id == user.organization_id)
+                )
+            }
+            code = self._next_wallet_code(parent.code, used_codes)
+            settlement_id = None
+            if row.instrument_kind == CARD_KIND and row.settlement_account_id is not None:
+                settlement_id = id_map.get(row.settlement_account_id)
+            wallet = Account(
+                organization_id=user.organization_id,
+                owner_user_id=user.id,
+                parent_id=parent.id,
+                code=code,
+                name=row.name,
+                account_type=parent.account_type,
+                normal_balance=parent.normal_balance,
+                is_postable=True,
+                is_payment_method=True,
+                is_system=False,
+                is_active=row.is_active,
+                sort_order=row.sort_order,
+                instrument_kind=row.instrument_kind,
+                currency=row.currency or "KRW",
+                opening_balance=row.opening_balance,
+                institution=row.institution,
+                card_payment_day=row.card_payment_day,
+                settlement_account_id=settlement_id,
+            )
+            self._session.add(wallet)
+            self._session.flush()
+            id_map[row.id] = wallet.id
+        for extra in unused:
+            if extra.instrument_kind == CARD_KIND:
+                extra.settlement_account_id = None
+            extra.is_active = False
+        self._session.flush()
+        for extra in unused:
+            if self._account_is_posted(extra.id):
+                continue
+            self._session.delete(extra)
+        self._session.flush()
+        return len(existing), len(id_map)
+
+    def _create_config_categories(self, user: User, rows: list[LedgerCategory]) -> int:
+        id_map: dict[int, int] = {}
+        for row in _order_categories(rows):
+            chart = self._account_repo.get_by_code(user.organization_id, row.chart_code)
+            if chart is None:
+                raise AccountingError(f"분류 '{row.name}'에 연결된 계정과목({row.chart_code})이 없어요.")
+            parent_id = id_map.get(row.parent_id) if row.parent_id is not None else None
+            category = Category(
+                organization_id=user.organization_id,
+                owner_user_id=user.id,
+                parent_id=parent_id,
+                account_id=chart.id,
+                name=row.name,
+                transaction_type=row.transaction_type,
+                default_scope=row.default_scope,
+                icon=row.icon,
+                is_system=False,
+                is_active=row.is_active,
+                sort_order=row.sort_order,
+            )
+            self._session.add(category)
+            self._session.flush()
+            id_map[row.id] = category.id
+        return len(id_map)
+
+    @staticmethod
+    def _next_wallet_code(parent_code: str, used: set[str]) -> str:
+        if parent_code.isdigit():
+            base = int(parent_code)
+            for offset in range(1, 1000):
+                candidate = str(base + offset)
+                if candidate not in used:
+                    return candidate
+        suffix = 1
+        while True:
+            candidate = f"{parent_code}-{suffix}"
+            if candidate not in used:
+                return candidate
+            suffix += 1
+
+    def _delete_user_rules(self, user: User) -> None:
+        rules = list(
+            self._session.scalars(
+                select(AutoCategoryRule).where(
+                    AutoCategoryRule.organization_id == user.organization_id,
+                    AutoCategoryRule.owner_user_id == user.id,
+                )
+            )
+        )
+        for rule in rules:
+            self._session.delete(rule)
+        self._session.flush()
+
+    def _delete_all_categories(self, user: User) -> int:
+        rows = list(
+            self._session.scalars(
+                select(Category).where(
+                    Category.organization_id == user.organization_id,
+                    Category.owner_user_id == user.id,
+                )
+            )
+        )
+        for category in rows:
+            category.parent_id = None
+        self._session.flush()
+        for category in rows:
+            self._session.delete(category)
+        self._session.flush()
+        return len(rows)
+
+    def _account_is_posted(self, account_id: int) -> bool:
+        if self._session.scalar(select(JournalLine.id).where(JournalLine.account_id == account_id).limit(1)) is not None:
+            return True
+        return (
+            self._session.scalar(
+                select(Transaction.id)
+                .where(
+                    (Transaction.payment_account_id == account_id) | (Transaction.transfer_account_id == account_id)
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
     def _build_bundle(self, user: User) -> LedgerBundle:
         organization = self._session.get(Organization, user.organization_id)
         wallets = self._account_repo.list_wallets(user.organization_id, owner_user_id=user.id, include_hidden=True)
@@ -168,14 +399,19 @@ class BackupService:
 
     def _transaction_row(self, transaction: Transaction) -> LedgerTransaction:
         attachments: list[LedgerAttachment] = []
+        month = transaction.occurred_on.strftime("%Y-%m")
+        used_names: set[str] = set()
         for attachment in transaction.attachments:
-            safe_name = Path(attachment.original_filename).name or "receipt.bin"
+            stored_name = Path(attachment.stored_path).name
+            if stored_name in used_names:
+                stored_name = f"{attachment.id}_{stored_name}"
+            used_names.add(stored_name)
             attachments.append(
                 LedgerAttachment(
                     original_filename=attachment.original_filename,
                     content_type=attachment.content_type,
                     file_size=int(attachment.file_size),
-                    path=f"attachments/{transaction.id}/{safe_name}",
+                    path=f"attachments/{month}/{stored_name}",
                 )
             )
         return LedgerTransaction(
@@ -184,6 +420,7 @@ class BackupService:
             transaction_type=transaction.transaction_type,
             scope=transaction.scope,
             amount=int(transaction.amount),
+            merchant=transaction.merchant,
             memo=transaction.memo,
             payment_account_id=transaction.payment_account_id,
             transfer_account_id=transaction.transfer_account_id,
@@ -284,10 +521,10 @@ class BackupService:
                 self._align_opening(found.id, row.opening_balance, opening_on, user.id)
                 continue
             settlement_id = None
-            if row.instrument_kind == CARD_KIND:
-                if row.settlement_account_id is None or row.settlement_account_id not in mapping:
+            if row.instrument_kind == CARD_KIND and row.settlement_account_id is not None:
+                settlement_id = mapping.get(row.settlement_account_id)
+                if settlement_id is None:
                     raise AccountingError(f"카드 '{row.name}'의 결제 계좌를 백업에서 찾지 못했어요.")
-                settlement_id = mapping[row.settlement_account_id]
             created_wallet = self._accounts.create_wallet(
                 WalletAccountCreate(
                     organization_id=user.organization_id,
@@ -484,6 +721,7 @@ class BackupService:
                     transaction_type=row.transaction_type,
                     scope=row.scope,
                     amount=row.amount,
+                    merchant=row.merchant,
                     memo=row.memo,
                     payment_account_id=payment_id,
                     transfer_account_id=transfer_id,
@@ -546,21 +784,35 @@ def _order_categories(rows: list[LedgerCategory]) -> list[LedgerCategory]:
     return ordered
 
 
+def decode_backup_bytes(payload: bytes) -> bytes:
+    if payload.startswith(b"\xef\xbb\xbf"):
+        return payload[3:]
+    if payload.startswith(b"\xff\xfe") or payload.startswith(b"\xfe\xff"):
+        return payload.decode("utf-16").encode("utf-8")
+    return payload
+
+
 def _read_bundle(payload: bytes) -> tuple[LedgerBundle, dict[str, bytes]]:
+    payload = decode_backup_bytes(payload)
     if len(payload) >= 4 and payload[:2] == b"PK":
         try:
             with zipfile.ZipFile(BytesIO(payload)) as archive:
                 names = archive.namelist()
-                if "ledger.json" not in names:
+                ledger_name = next((name for name in names if name.endswith("ledger.json")), None)
+                if ledger_name is None:
                     raise AccountingError("백업 파일에 ledger.json 이 없어요.")
-                bundle = LedgerBundle.model_validate_json(archive.read("ledger.json"))
+                bundle = LedgerBundle.model_validate_json(archive.read(ledger_name))
                 files = {
-                    name: archive.read(name)
+                    name.replace("\\", "/"): archive.read(name)
                     for name in names
-                    if name.startswith("attachments/") and not name.endswith("/")
+                    if name.replace("\\", "/").startswith("attachments/") and not name.endswith("/")
                 }
         except zipfile.BadZipFile as error:
             raise AccountingError("백업 ZIP 파일을 읽지 못했어요.") from error
+        except AccountingError:
+            raise
+        except ValueError as error:
+            raise AccountingError("백업 파일 형식이 올바르지 않아요.") from error
     else:
         try:
             bundle = LedgerBundle.model_validate_json(payload)

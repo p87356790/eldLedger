@@ -4,7 +4,7 @@ from datetime import date
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Transaction, TransactionItem, TransactionTag
+from app.models import Category, Transaction, TransactionItem, TransactionTag
 from app.models.enums import RecordStatus, Scope, TransactionType
 
 
@@ -87,7 +87,7 @@ class TransactionRepository:
         stmt = (
             select(Transaction)
             .options(
-                selectinload(Transaction.items).selectinload(TransactionItem.category),
+                selectinload(Transaction.items).selectinload(TransactionItem.category).selectinload(Category.parent),
                 selectinload(Transaction.payment_account),
                 selectinload(Transaction.transfer_account),
                 selectinload(Transaction.attachments),
@@ -109,6 +109,37 @@ class TransactionRepository:
             stmt.order_by(Transaction.occurred_on.desc(), Transaction.id.desc())
         ).all()
 
+    def find_same_day_candidates(
+        self,
+        *,
+        organization_id: int,
+        occurred_on: date,
+        amount: int,
+        transaction_type: TransactionType,
+        payment_account_id: int,
+        created_by_user_id: int | None = None,
+        exclude_id: int | None = None,
+        limit: int = 20,
+    ) -> Sequence[Transaction]:
+        stmt = (
+            select(Transaction)
+            .options(
+                selectinload(Transaction.items),
+                selectinload(Transaction.transaction_tags).selectinload(TransactionTag.tag),
+                selectinload(Transaction.attachments),
+            )
+            .where(Transaction.organization_id == organization_id)
+            .where(Transaction.status != RecordStatus.REVERSED)
+            .where(Transaction.occurred_on == occurred_on)
+            .where(Transaction.amount == amount)
+            .where(Transaction.transaction_type == transaction_type)
+            .where(Transaction.payment_account_id == payment_account_id)
+        )
+        if created_by_user_id is not None:
+            stmt = stmt.where(Transaction.created_by_user_id == created_by_user_id)
+        if exclude_id is not None:
+            stmt = stmt.where(Transaction.id != exclude_id)
+        return self._session.scalars(stmt.order_by(Transaction.id.desc()).limit(limit)).all()
 
     def _apply_filters(
         self,
