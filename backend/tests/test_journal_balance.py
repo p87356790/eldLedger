@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from app.schemas.accounting import JournalEntryCreate, JournalLineCreate, TransactionCreate, TransactionItemCreate
 from app.services.journal_balance import InvalidJournalLineError, UnbalancedJournalError, assert_journal_balanced
-from app.models.enums import Scope, TransactionType
+from app.models.enums import Scope, TransactionItemKind, TransactionType
 
 
 def test_balanced_expense_journal() -> None:
@@ -64,5 +64,52 @@ def test_transaction_schema_requires_item_total_to_match() -> None:
             items=[
                 TransactionItemCreate(amount=30_000, scope=Scope.BUSINESS, line_no=1),
                 TransactionItemCreate(amount=60_000, scope=Scope.PERSONAL, line_no=2),
+            ],
+        )
+
+
+def test_income_with_deductions_schema_accepts_gross_minus_net() -> None:
+    payload = TransactionCreate(
+        organization_id=1,
+        occurred_on=date(2026, 9, 25),
+        transaction_type=TransactionType.INCOME,
+        scope=Scope.PERSONAL,
+        amount=4_200_000,
+        payment_account_id=1,
+        items=[
+            TransactionItemCreate(
+                amount=5_000_000,
+                scope=Scope.PERSONAL,
+                line_no=1,
+                line_kind=TransactionItemKind.STANDARD,
+            ),
+            TransactionItemCreate(
+                amount=800_000,
+                scope=Scope.PERSONAL,
+                line_no=2,
+                line_kind=TransactionItemKind.DEDUCTION,
+            ),
+        ],
+    )
+    assert payload.amount == 4_200_000
+
+
+def test_income_with_deductions_schema_rejects_unbalanced_net() -> None:
+    with pytest.raises(ValidationError):
+        TransactionCreate(
+            organization_id=1,
+            occurred_on=date(2026, 9, 25),
+            transaction_type=TransactionType.INCOME,
+            scope=Scope.PERSONAL,
+            amount=4_200_000,
+            payment_account_id=1,
+            items=[
+                TransactionItemCreate(amount=5_000_000, scope=Scope.PERSONAL, line_no=1),
+                TransactionItemCreate(
+                    amount=900_000,
+                    scope=Scope.PERSONAL,
+                    line_no=2,
+                    line_kind=TransactionItemKind.DEDUCTION,
+                ),
             ],
         )

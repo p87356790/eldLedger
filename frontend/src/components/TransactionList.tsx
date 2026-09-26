@@ -12,7 +12,8 @@ import {
   Typography,
 } from "@mui/material";
 
-import type { Account, Category, Transaction } from "../api/client";
+import type { Account, Category, Transaction, TransactionItem } from "../api/client";
+import { deductionTotalOf, grossAmountOf, isIncomeWithDeductions } from "../utils/incomeDeductions";
 import { formatDisplayDate, formatWonWithSymbol } from "../utils/money";
 
 interface TransactionListProps {
@@ -34,6 +35,15 @@ const SCOPE_LABEL: Record<Transaction["scope"], string> = {
   BUSINESS: "사업",
   MIXED: "혼합",
 };
+
+function itemDisplayName(item: TransactionItem, categoryName: (id: number | null) => string): string {
+  const memo = item.memo?.trim() ?? "";
+  const category = categoryName(item.category_id);
+  if (memo !== "" && category !== "") {
+    return `${memo} (${category})`;
+  }
+  return memo !== "" ? memo : category;
+}
 
 export function TransactionList({
   transactions,
@@ -75,7 +85,7 @@ export function TransactionList({
                   : transaction.merchant?.trim()
                     ? transaction.merchant
                     : transaction.items
-                        .map((item) => categoryName(item.category_id))
+                        .map((item) => itemDisplayName(item, categoryName))
                         .filter((name) => name !== "")
                         .join(" · ") || TYPE_LABEL[transaction.transaction_type];
               const amountPrefix =
@@ -84,11 +94,12 @@ export function TransactionList({
                   : transaction.transaction_type === "EXPENSE"
                     ? "-"
                     : "";
+              const payroll = isIncomeWithDeductions(transaction);
               const categoryLabel =
                 transaction.transaction_type === "TRANSFER"
                   ? null
                   : transaction.items
-                      .map((item) => categoryName(item.category_id))
+                      .map((item) => itemDisplayName(item, categoryName))
                       .filter((name) => name !== "")
                       .join(" · ") || null;
               return (
@@ -119,6 +130,12 @@ export function TransactionList({
                               {formatWonWithSymbol(transaction.amount)}
                             </Typography>
                           </Stack>
+                          {payroll && (
+                            <Typography variant="body2" color="text.secondary">
+                              세전 {formatWonWithSymbol(grossAmountOf(transaction))} · 공제{" "}
+                              {formatWonWithSymbol(deductionTotalOf(transaction))}
+                            </Typography>
+                          )}
                           {transaction.memo != null && transaction.memo.trim() !== "" && (
                             <Typography variant="body2" color="text.secondary">
                               {transaction.memo}

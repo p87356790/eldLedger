@@ -3,7 +3,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.enums import CategoryDefaultScope, PaymentInstrumentKind, Scope, TransactionType
+from app.models.enums import CategoryDefaultScope, PaymentInstrumentKind, Scope, TransactionItemKind, TransactionType
 
 LEDGER_FORMAT = "eldledger-ledger"
 LEDGER_VERSION = 1
@@ -56,6 +56,7 @@ class LedgerItem(BaseModel):
     scope: Scope
     memo: str | None = None
     line_no: int = 0
+    line_kind: TransactionItemKind = TransactionItemKind.STANDARD
 
 
 class LedgerAttachment(BaseModel):

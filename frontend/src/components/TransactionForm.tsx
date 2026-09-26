@@ -37,6 +37,7 @@ import {
 } from "../api/client";
 import type { Account, Attachment, Category, Scope, Tag, Transaction, TransactionType } from "../api/client";
 import { categoryLabel as formatCategoryPath, flattenCategoryTree } from "../utils/categories";
+import { deductionItems, isIncomeWithDeductions, standardItems } from "../utils/incomeDeductions";
 import { formatDisplayDate, formatWon, formatWonWithSymbol, parseWon, todayIsoDate } from "../utils/money";
 import { collectReceiptFiles } from "../utils/receipts";
 import { ReceiptGallery } from "./ReceiptGallery";
@@ -78,7 +79,15 @@ interface SplitRow {
   key: string;
   amount: string;
   categoryId: string;
+  memo: string;
   scope: "PERSONAL" | "BUSINESS";
+}
+
+interface LineRow {
+  key: string;
+  amount: string;
+  categoryId: string;
+  memo: string;
 }
 
 interface TransactionFormProps {
@@ -96,8 +105,134 @@ function newSplitRow(scope: "PERSONAL" | "BUSINESS" = "BUSINESS"): SplitRow {
     key: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     amount: "",
     categoryId: "",
+    memo: "",
     scope,
   };
+}
+
+function newLineRow(): LineRow {
+  return {
+    key: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    amount: "",
+    categoryId: "",
+    memo: "",
+  };
+}
+
+function lineMemo(value: string): string | null {
+  const cleaned = value.trim();
+  return cleaned === "" ? null : cleaned;
+}
+
+function activeLineRows(rows: LineRow[]): LineRow[] {
+  return rows.filter((row) => parseWon(row.amount) > 0 || row.categoryId !== "" || row.memo.trim() !== "");
+}
+
+function lineFromItem(item: { id: number; amount: number; category_id: number | null; memo: string | null }): LineRow {
+  return {
+    key: String(item.id),
+    amount: formatWon(item.amount),
+    categoryId: item.category_id == null ? "" : String(item.category_id),
+    memo: item.memo ?? "",
+  };
+}
+
+function linesIncomplete(rows: LineRow[]): boolean {
+  return rows.length === 0 || rows.some((row) => parseWon(row.amount) <= 0 || row.categoryId === "");
+}
+
+function LineItemRows({
+  rows,
+  onChange,
+  categories,
+  amountLabel,
+  categoryLabel,
+  memoPlaceholder,
+  addLabel,
+  removeLabel,
+  minCount,
+  onPickCategory,
+}: {
+  rows: LineRow[];
+  onChange: (next: LineRow[]) => void;
+  categories: Category[];
+  amountLabel: (index: number) => string;
+  categoryLabel: string;
+  memoPlaceholder: string;
+  addLabel: string;
+  removeLabel: string;
+  minCount: number;
+  onPickCategory?: (category: Category) => void;
+}) {
+  return (
+    <Stack spacing={1.5}>
+      {rows.map((row, index) => (
+        <Stack key={row.key} direction={{ xs: "column", sm: "row" }} spacing={1}>
+          <TextField
+            label={amountLabel(index)}
+            value={row.amount}
+            onChange={(event) => {
+              const digits = event.target.value.replace(/[^\d]/g, "");
+              const next = [...rows];
+              next[index] = { ...row, amount: digits === "" ? "" : formatWon(parseWon(digits)) };
+              onChange(next);
+            }}
+            slotProps={{ input: { startAdornment: <InputAdornment position="start">₩</InputAdornment> } }}
+            sx={{ minWidth: { sm: 140 }, flex: 1 }}
+          />
+          <FormControl sx={{ minWidth: { sm: 160 }, flex: 1 }}>
+            <InputLabel shrink>{categoryLabel}</InputLabel>
+            <Select
+              notched
+              label={categoryLabel}
+              value={row.categoryId}
+              displayEmpty
+              renderValue={(selected) => {
+                const chosen = categories.find((item) => String(item.id) === String(selected));
+                return chosen === undefined ? "선택하세요" : formatCategoryPath(chosen, categories);
+              }}
+              onChange={(event) => {
+                const nextId = String(event.target.value);
+                const chosen = categories.find((item) => String(item.id) === nextId);
+                const next = [...rows];
+                next[index] = { ...row, categoryId: nextId };
+                onChange(next);
+                if (chosen !== undefined) {
+                  onPickCategory?.(chosen);
+                }
+              }}
+            >
+              {categories.map((category) => (
+                <MenuItem key={category.id} value={String(category.id)} sx={{ pl: category.parent_id === null ? 2 : 4 }}>
+                  {formatCategoryPath(category, categories)}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <TextField
+            label="항목 (선택)"
+            value={row.memo}
+            onChange={(event) => {
+              const next = [...rows];
+              next[index] = { ...row, memo: event.target.value };
+              onChange(next);
+            }}
+            placeholder={memoPlaceholder}
+            inputProps={{ maxLength: 255 }}
+            sx={{ minWidth: { sm: 140 }, flex: 1 }}
+          />
+          {rows.length > minCount && (
+            <IconButton aria-label={removeLabel} onClick={() => onChange(rows.filter((item) => item.key !== row.key))}>
+              <DeleteOutlineIcon />
+            </IconButton>
+          )}
+        </Stack>
+      ))}
+      <Button startIcon={<AddIcon />} variant="outlined" onClick={() => onChange([...rows, newLineRow()])}>
+        {addLabel}
+      </Button>
+    </Stack>
+  );
 }
 
 export function TransactionForm({
@@ -112,6 +247,8 @@ export function TransactionForm({
   const [tab, setTab] = useState<TransactionType>("EXPENSE");
   const [business, setBusiness] = useState<boolean>(false);
   const [split, setSplit] = useState<boolean>(false);
+  const [withDeductions, setWithDeductions] = useState<boolean>(false);
+  const [itemized, setItemized] = useState<boolean>(false);
   const [occurredOn, setOccurredOn] = useState<string>(todayIsoDate());
   const [amountText, setAmountText] = useState<string>("");
   const [paymentAccountId, setPaymentAccountId] = useState<string>("");
@@ -120,6 +257,9 @@ export function TransactionForm({
   const [memo, setMemo] = useState<string>("");
   const [merchant, setMerchant] = useState<string>("");
   const [splits, setSplits] = useState<SplitRow[]>([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
+  const [incomeLines, setIncomeLines] = useState<LineRow[]>([newLineRow()]);
+  const [deductions, setDeductions] = useState<LineRow[]>([newLineRow()]);
+  const [expenseLines, setExpenseLines] = useState<LineRow[]>([newLineRow(), newLineRow()]);
   const [files, setFiles] = useState<File[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -139,9 +279,10 @@ export function TransactionForm({
     }
     setTab(editing.transaction_type);
     setBusiness(editing.scope === "BUSINESS");
-    setSplit(editing.scope === "MIXED");
+    const payroll = isIncomeWithDeductions(editing);
+    setWithDeductions(payroll);
+    setSplit(editing.scope === "MIXED" && !payroll);
     setOccurredOn(editing.occurred_on);
-    setAmountText(formatWon(editing.amount));
     setPaymentAccountId(String(editing.payment_account_id));
     setTransferAccountId(editing.transfer_account_id == null ? "" : String(editing.transfer_account_id));
     setMemo(editing.memo ?? "");
@@ -151,18 +292,48 @@ export function TransactionForm({
     setError(null);
     setSuccess(null);
     setDuplicateMatches([]);
-    if (editing.scope === "MIXED") {
+    if (payroll) {
+      const incomeItems = standardItems(editing.items);
+      setItemized(false);
+      setIncomeLines(incomeItems.length === 0 ? [newLineRow()] : incomeItems.map(lineFromItem));
+      setAmountText("");
       setCategoryId("");
+      const withheld = deductionItems(editing.items);
+      setDeductions(withheld.length === 0 ? [newLineRow()] : withheld.map(lineFromItem));
+      setSplits([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
+      setExpenseLines([newLineRow(), newLineRow()]);
+      return;
+    }
+    setIncomeLines([newLineRow()]);
+    setDeductions([newLineRow()]);
+    if (editing.scope === "MIXED") {
+      setItemized(false);
+      setAmountText(formatWon(editing.amount));
+      setCategoryId("");
+      setExpenseLines([newLineRow(), newLineRow()]);
       setSplits(
         editing.items.map((item) => ({
           key: String(item.id),
           amount: formatWon(item.amount),
           categoryId: item.category_id == null ? "" : String(item.category_id),
+          memo: item.memo ?? "",
           scope: item.scope === "BUSINESS" ? "BUSINESS" : "PERSONAL",
         })),
       );
       return;
     }
+    const itemizedExpense = editing.transaction_type === "EXPENSE" && editing.items.length > 1;
+    if (itemizedExpense) {
+      setItemized(true);
+      setAmountText("");
+      setCategoryId("");
+      setExpenseLines(editing.items.map(lineFromItem));
+      setSplits([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
+      return;
+    }
+    setItemized(false);
+    setAmountText(formatWon(editing.amount));
+    setExpenseLines([newLineRow(), newLineRow()]);
     const first = editing.items[0];
     setCategoryId(first?.category_id == null ? "" : String(first.category_id));
   }, [editing]);
@@ -175,9 +346,23 @@ export function TransactionForm({
     () => flattenCategoryTree(categories.filter((category) => category.transaction_type === tab && category.is_active)),
     [categories, tab],
   );
+  const expenseCategories = useMemo(
+    () => flattenCategoryTree(categories.filter((category) => category.transaction_type === "EXPENSE" && category.is_active)),
+    [categories],
+  );
 
   const amount = parseWon(amountText);
   const splitTotal = splits.reduce((sum, row) => sum + parseWon(row.amount), 0);
+  const filledIncomeLines = activeLineRows(incomeLines);
+  const filledDeductions = activeLineRows(deductions);
+  const filledExpenseLines = activeLineRows(expenseLines);
+  const incomeLineTotal = filledIncomeLines.reduce((sum, row) => sum + parseWon(row.amount), 0);
+  const deductionTotal = filledDeductions.reduce((sum, row) => sum + parseWon(row.amount), 0);
+  const expenseLineTotal = filledExpenseLines.reduce((sum, row) => sum + parseWon(row.amount), 0);
+  const payrollMode = tab === "INCOME" && withDeductions;
+  const itemizedMode = tab === "EXPENSE" && itemized && !split;
+  const grossAmount = payrollMode ? incomeLineTotal : amount;
+  const netAmount = grossAmount - deductionTotal;
   const paymentLabel =
     tab === "INCOME" ? "어느 계좌로 들어왔나요?" : tab === "TRANSFER" ? "어디서 보냈나요?" : "어떻게 냈나요?";
   const categoryFieldLabel = tab === "INCOME" ? "어떤 수입인가요?" : "어디에 사용했나요?";
@@ -197,7 +382,12 @@ export function TransactionForm({
     setSelectedTagIds([]);
     setBusiness(false);
     setSplit(false);
+    setWithDeductions(false);
+    setItemized(false);
     setSplits([newSplitRow("BUSINESS"), newSplitRow("PERSONAL")]);
+    setIncomeLines([newLineRow()]);
+    setDeductions([newLineRow()]);
+    setExpenseLines([newLineRow(), newLineRow()]);
     setError(null);
     setDuplicateMatches([]);
     setDropActive(false);
@@ -229,7 +419,7 @@ export function TransactionForm({
       setError("날짜를 선택해 주세요.");
       return;
     }
-    if (amount <= 0) {
+    if (amount <= 0 && !payrollMode && !itemizedMode) {
       setError("금액을 입력해 주세요.");
       return;
     }
@@ -241,9 +431,37 @@ export function TransactionForm({
       setError("돈을 옮길 계좌를 다르게 선택해 주세요.");
       return;
     }
-    if (tab !== "TRANSFER" && scope !== "MIXED" && categoryId === "") {
-      setError("어디에 쓰셨는지 분류를 선택해 주세요.");
+    if (tab !== "TRANSFER" && scope !== "MIXED" && !payrollMode && !itemizedMode && categoryId === "") {
+      setError(tab === "INCOME" ? "어떤 수입인지 분류를 선택해 주세요." : "어디에 쓰셨는지 분류를 선택해 주세요.");
       return;
+    }
+    if (payrollMode) {
+      if (linesIncomplete(filledIncomeLines)) {
+        setError("수입 항목의 분류와 금액을 모두 입력해 주세요.");
+        return;
+      }
+      if (grossAmount <= 0) {
+        setError("세전 수입을 한 줄 이상 입력해 주세요.");
+        return;
+      }
+      if (linesIncomplete(filledDeductions)) {
+        setError("공제 항목의 분류와 금액을 모두 입력해 주세요.");
+        return;
+      }
+      if (deductionTotal <= 0 || deductionTotal >= grossAmount) {
+        setError("공제 합계는 세전 금액보다 작아야 해요.");
+        return;
+      }
+      if (netAmount <= 0) {
+        setError("실수령은 0보다 커야 해요.");
+        return;
+      }
+    }
+    if (itemizedMode) {
+      if (linesIncomplete(filledExpenseLines)) {
+        setError("나눈 항목의 분류와 금액을 모두 입력해 주세요.");
+        return;
+      }
     }
     if (scope === "MIXED") {
       if (splits.length < 2) {
@@ -263,31 +481,62 @@ export function TransactionForm({
     const items =
       tab === "TRANSFER"
         ? []
-        : scope === "MIXED"
-          ? splits.map((row, index) => ({
-              category_id: Number(row.categoryId),
-              account_id: null,
-              amount: parseWon(row.amount),
-              scope: row.scope,
-              memo: null,
-              line_no: index + 1,
-            }))
-          : [
-              {
-                category_id: Number(categoryId),
+        : payrollMode
+          ? [
+              ...filledIncomeLines.map((row, index) => ({
+                category_id: Number(row.categoryId),
                 account_id: null,
-                amount,
+                amount: parseWon(row.amount),
                 scope,
-                memo: null,
-                line_no: 1,
-              },
-            ];
+                memo: lineMemo(row.memo),
+                line_no: index + 1,
+                line_kind: "STANDARD" as const,
+              })),
+              ...filledDeductions.map((row, index) => ({
+                category_id: Number(row.categoryId),
+                account_id: null,
+                amount: parseWon(row.amount),
+                scope,
+                memo: lineMemo(row.memo),
+                line_no: filledIncomeLines.length + index + 1,
+                line_kind: "DEDUCTION" as const,
+              })),
+            ]
+          : scope === "MIXED"
+            ? splits.map((row, index) => ({
+                category_id: Number(row.categoryId),
+                account_id: null,
+                amount: parseWon(row.amount),
+                scope: row.scope,
+                memo: lineMemo(row.memo),
+                line_no: index + 1,
+              }))
+            : itemizedMode
+              ? filledExpenseLines.map((row, index) => ({
+                  category_id: Number(row.categoryId),
+                  account_id: null,
+                  amount: parseWon(row.amount),
+                  scope,
+                  memo: lineMemo(row.memo),
+                  line_no: index + 1,
+                  line_kind: "STANDARD" as const,
+                }))
+              : [
+                  {
+                    category_id: Number(categoryId),
+                    account_id: null,
+                    amount,
+                    scope,
+                    memo: null,
+                    line_no: 1,
+                  },
+                ];
 
     const payload = {
       occurred_on: occurredOn,
       transaction_type: tab,
       scope: tab === "TRANSFER" ? (scope === "MIXED" ? "PERSONAL" : scope) : scope,
-      amount,
+      amount: payrollMode ? netAmount : itemizedMode ? expenseLineTotal : amount,
       merchant: tab === "TRANSFER" || merchant.trim() === "" ? null : merchant.trim(),
       memo: memo.trim() === "" ? null : memo.trim(),
       payment_account_id: Number(paymentAccountId),
@@ -367,6 +616,12 @@ export function TransactionForm({
               if (value === "TRANSFER") {
                 setSplit(false);
               }
+              if (value !== "INCOME") {
+                setWithDeductions(false);
+              }
+              if (value !== "EXPENSE") {
+                setItemized(false);
+              }
             }}
             variant="fullWidth"
             sx={{
@@ -388,6 +643,63 @@ export function TransactionForm({
             <Tab value="TRANSFER" label="계좌이체" />
           </Tabs>
 
+          {tab === "INCOME" && (
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={withDeductions}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setWithDeductions(enabled);
+                    if (enabled) {
+                      setSplit(false);
+                      if (parseWon(amountText) > 0 || categoryId !== "") {
+                        setIncomeLines([
+                          {
+                            key: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                            amount: amountText,
+                            categoryId,
+                            memo: "",
+                          },
+                        ]);
+                      }
+                    }
+                  }}
+                />
+              }
+              label="공제 있는 수입 (급여·세금 등)"
+            />
+          )}
+
+          {tab === "EXPENSE" && !split && (
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={itemized}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setItemized(enabled);
+                    if (enabled) {
+                      setSplit(false);
+                      if (parseWon(amountText) > 0 || categoryId !== "") {
+                        setExpenseLines([
+                          {
+                            key: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                            amount: amountText,
+                            categoryId,
+                            memo: "",
+                          },
+                          newLineRow(),
+                        ]);
+                      }
+                    }
+                  }}
+                />
+              }
+              label="항목별로 나누기 (마트 영수증 등)"
+            />
+          )}
+
           <TextField
             label="언제인가요?"
             type="date"
@@ -396,6 +708,7 @@ export function TransactionForm({
             slotProps={{ inputLabel: { shrink: true } }}
           />
 
+          {!payrollMode && !itemizedMode && (
           <TextField
             label="얼마인가요?"
             value={amountText}
@@ -412,6 +725,7 @@ export function TransactionForm({
               },
             }}
           />
+          )}
 
           <FormControl>
             <InputLabel shrink>{paymentLabel}</InputLabel>
@@ -451,7 +765,7 @@ export function TransactionForm({
             </FormControl>
           )}
 
-          {tab !== "TRANSFER" && scope !== "MIXED" && (
+          {tab !== "TRANSFER" && scope !== "MIXED" && !payrollMode && !itemizedMode && (
             <FormControl>
               <InputLabel shrink>{categoryFieldLabel}</InputLabel>
               <Select
@@ -479,6 +793,68 @@ export function TransactionForm({
               ))}
               </Select>
             </FormControl>
+          )}
+
+          {payrollMode && (
+            <Stack spacing={1.5}>
+              <Typography sx={{ fontWeight: 700 }}>수입 (기본급, 상여, OT 등)</Typography>
+              <LineItemRows
+                rows={incomeLines}
+                onChange={setIncomeLines}
+                categories={typeCategories}
+                amountLabel={(index) => `${index + 1}번째 수입 금액`}
+                categoryLabel="수입 분류"
+                memoPlaceholder="예: 기본급, 상여"
+                addLabel="수입 더 넣기"
+                removeLabel="수입 항목 삭제"
+                minCount={1}
+                onPickCategory={(chosen) => {
+                  if (chosen.default_scope !== "COMMON") {
+                    setBusiness(chosen.default_scope === "BUSINESS");
+                  }
+                }}
+              />
+              <Typography sx={{ fontWeight: 700 }}>공제 (세금, 건보 등)</Typography>
+              <LineItemRows
+                rows={deductions}
+                onChange={setDeductions}
+                categories={expenseCategories}
+                amountLabel={(index) => `${index + 1}번째 공제 금액`}
+                categoryLabel="공제 분류"
+                memoPlaceholder="예: 국민연금, 점심비용"
+                addLabel="공제 더 넣기"
+                removeLabel="공제 삭제"
+                minCount={1}
+              />
+              <Typography color={netAmount > 0 && deductionTotal > 0 && deductionTotal < grossAmount ? "success.main" : "text.secondary"}>
+                실수령 {formatWon(Math.max(netAmount, 0))}원 · 세전 {formatWon(grossAmount)}원 · 공제 {formatWon(deductionTotal)}원
+              </Typography>
+            </Stack>
+          )}
+
+          {itemizedMode && (
+            <Stack spacing={1.5}>
+              <Typography sx={{ fontWeight: 700 }}>항목별로 나눠 주세요</Typography>
+              <LineItemRows
+                rows={expenseLines}
+                onChange={setExpenseLines}
+                categories={typeCategories}
+                amountLabel={(index) => `${index + 1}번째 금액`}
+                categoryLabel="분류"
+                memoPlaceholder="예: 우유, 라면"
+                addLabel="항목 더 넣기"
+                removeLabel="항목 삭제"
+                minCount={1}
+                onPickCategory={(chosen) => {
+                  if (chosen.default_scope !== "COMMON" && !split) {
+                    setBusiness(chosen.default_scope === "BUSINESS");
+                  }
+                }}
+              />
+              <Typography color={expenseLineTotal > 0 ? "success.main" : "text.secondary"}>
+                합계 {formatWon(expenseLineTotal)}원
+              </Typography>
+            </Stack>
           )}
 
           {tab !== "TRANSFER" && scope === "MIXED" && (
@@ -528,6 +904,18 @@ export function TransactionForm({
                       ))}
                     </Select>
                   </FormControl>
+                  <TextField
+                    label="항목 (선택)"
+                    value={row.memo}
+                    onChange={(event) => {
+                      const next = [...splits];
+                      next[index] = { ...row, memo: event.target.value };
+                      setSplits(next);
+                    }}
+                    placeholder="예: 우유"
+                    inputProps={{ maxLength: 255 }}
+                    sx={{ minWidth: { sm: 120 }, flex: 1 }}
+                  />
                   <FormControlLabel
                     sx={{ minWidth: { sm: 120 }, ml: { sm: 0.5 } }}
                     control={
@@ -594,10 +982,18 @@ export function TransactionForm({
                 }
                 label="회사"
               />
-              <FormControlLabel
-                control={<Checkbox checked={split} onChange={(event) => setSplit(event.target.checked)} />}
-                label="둘다"
-              />
+              {!payrollMode && !itemizedMode && (
+                <FormControlLabel
+                  control={<Checkbox checked={split} onChange={(event) => {
+                    setSplit(event.target.checked);
+                    if (event.target.checked) {
+                      setWithDeductions(false);
+                      setItemized(false);
+                    }
+                  }} />}
+                  label="둘다"
+                />
+              )}
             </Stack>
           )}
 

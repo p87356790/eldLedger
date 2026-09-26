@@ -618,7 +618,13 @@ function TransactionRows({
                   </Stack>
                 }
                 secondary={
-                  <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ mt: 0.75 }}>
+                  <Stack gap={0.5} sx={{ mt: 0.5 }}>
+                    {row.gross_amount != null && row.deduction_amount != null && (
+                      <Typography variant="caption" color="text.secondary">
+                        세전 {formatWonWithSymbol(row.gross_amount)} · 공제 {formatWonWithSymbol(row.deduction_amount)}
+                      </Typography>
+                    )}
+                    <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
                     <Chip size="small" label={TYPE_LABEL[row.transaction_type]} />
                     <Chip
                       size="small"
@@ -644,6 +650,7 @@ function TransactionRows({
                         {row.memo}
                       </Typography>
                     )}
+                    </Stack>
                   </Stack>
                 }
               />

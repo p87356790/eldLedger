@@ -17,6 +17,7 @@ from app.schemas.dashboard import (
     DashboardTransactionRow,
 )
 from app.services.account_service import AccountService
+from app.services.transaction_amounts import is_deduction_item, partition_items
 
 
 class DashboardService:
@@ -71,13 +72,9 @@ class DashboardService:
             bucket[2] += 1
 
         for transaction in current_rows:
-            business_amount = _business_amount(transaction)
-            if business_amount <= 0:
-                continue
-            if transaction.transaction_type == TransactionType.INCOME:
-                business_income += business_amount
-            elif transaction.transaction_type == TransactionType.EXPENSE:
-                business_expense += business_amount
+            income, expense = _income_expense_amounts(transaction, DashboardScopeFilter.BUSINESS)
+            business_income += income
+            business_expense += expense
 
         daily = [
             DashboardDailyAggregate(
@@ -179,7 +176,10 @@ def _category_amounts(transaction: Transaction, scope: DashboardScopeFilter) -> 
         amount = _item_amount_for_scope(transaction, item, scope)
         if amount <= 0:
             continue
-        rows.append((_category_bucket(item.category, transaction.transaction_type), amount))
+        item_type = (
+            TransactionType.EXPENSE if is_deduction_item(item) else transaction.transaction_type
+        )
+        rows.append((_category_bucket(item.category, item_type), amount))
     return rows
 
 
@@ -250,20 +250,27 @@ def _income_expense_amounts(
             return 0, amount
         return 0, 0
     if transaction.transaction_type == TransactionType.INCOME:
+        standard_items, deduction_items = partition_items(transaction.items)
+        if deduction_items:
+            income = sum(_item_amount_for_scope(transaction, item, scope) for item in standard_items)
+            expense = sum(_item_amount_for_scope(transaction, item, scope) for item in deduction_items)
+            return income, expense
         return amount, 0
     if transaction.transaction_type == TransactionType.EXPENSE:
         return 0, amount
     return 0, 0
 
 
-def _business_amount(transaction: Transaction) -> int:
-    if transaction.transaction_type == TransactionType.TRANSFER:
-        return 0
-    if transaction.scope == Scope.BUSINESS:
-        return int(transaction.amount)
-    if transaction.scope == Scope.MIXED:
-        return sum(int(item.amount) for item in transaction.items if item.scope == Scope.BUSINESS)
-    return 0
+def _item_display_name(item: TransactionItem) -> str | None:
+    memo = (item.memo or "").strip()
+    category_name = item.category.name if item.category is not None and item.category.name else ""
+    if memo != "" and category_name != "":
+        return f"{memo} ({category_name})"
+    if memo != "":
+        return memo
+    if category_name != "":
+        return category_name
+    return None
 
 
 def _to_row(
@@ -271,16 +278,19 @@ def _to_row(
     account_id: int | None = None,
     scope: DashboardScopeFilter = DashboardScopeFilter.ALL,
 ) -> DashboardTransactionRow:
+    standard_items, deduction_items = partition_items(transaction.items)
     category_names = [
-        item.category.name
+        name
         for item in transaction.items
-        if item.category is not None and item.category.name
+        if (name := _item_display_name(item))
     ]
     payment = transaction.payment_account.name if transaction.payment_account is not None else ""
     if transaction.transaction_type == TransactionType.TRANSFER and transaction.transfer_account is not None:
         payment = f"{payment} → {transaction.transfer_account.name}"
     income, expense = _income_expense_amounts(transaction, scope, account_id)
     signed_amount = income - expense
+    gross_amount = sum(int(item.amount) for item in standard_items) if deduction_items else None
+    deduction_amount = sum(int(item.amount) for item in deduction_items) if deduction_items else None
     return DashboardTransactionRow(
         id=transaction.id,
         occurred_on=transaction.occurred_on,
@@ -293,4 +303,6 @@ def _to_row(
         merchant=transaction.merchant,
         memo=transaction.memo,
         has_attachment=len(transaction.attachments) > 0,
+        gross_amount=gross_amount,
+        deduction_amount=deduction_amount,
     )

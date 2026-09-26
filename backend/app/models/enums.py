@@ -50,6 +50,13 @@ class TransactionType(str, Enum):
     TRANSFER = "TRANSFER"
 
 
+class TransactionItemKind(str, Enum):
+    """STANDARD is the cashbook line; DEDUCTION is withheld tax etc. on income."""
+
+    STANDARD = "STANDARD"
+    DEDUCTION = "DEDUCTION"
+
+
 class RecordStatus(str, Enum):
     DRAFT = "DRAFT"
     CONFIRMED = "CONFIRMED"

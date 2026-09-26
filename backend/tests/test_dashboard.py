@@ -399,3 +399,55 @@ def test_dashboard_hides_other_users_transactions(client: TestClient, db_session
             return loaded
 
         app.dependency_overrides[get_current_user] = override_admin
+
+
+def test_dashboard_income_with_deductions_uses_gross_and_withholding(client: TestClient, db_session: Session) -> None:
+    organization = _seed(db_session)
+    wallets = _wallets(client, organization.id)
+    categories = _categories(client, organization.id)
+    bank = wallets["BANK"]
+
+    created = _post_tx(
+        client,
+        organization_id=organization.id,
+        occurred_on="2026-09-25",
+        transaction_type="INCOME",
+        scope="PERSONAL",
+        amount=4_200_000,
+        payment_account_id=bank["id"],
+        items=[
+            {
+                "category_id": categories["급여"]["id"],
+                "amount": 5_000_000,
+                "scope": "PERSONAL",
+                "line_no": 1,
+                "line_kind": "STANDARD",
+            },
+            {
+                "category_id": categories["세금"]["id"],
+                "amount": 800_000,
+                "scope": "PERSONAL",
+                "line_no": 2,
+                "line_kind": "DEDUCTION",
+            },
+        ],
+        memo="9월 급여",
+    )
+    assert created["amount"] == 4_200_000
+
+    body = client.get("/api/v1/dashboard/summary?start_date=2026-09-01&end_date=2026-09-30").json()
+    assert body["summary"]["total_income"] == 5_000_000
+    assert body["summary"]["total_expense"] == 800_000
+    assert body["summary"]["net_change"] == 4_200_000
+    assert len(body["transactions"]) == 1
+    row = body["transactions"][0]
+    assert row["amount"] == 4_200_000
+    assert row["signed_amount"] == 4_200_000
+    assert row["gross_amount"] == 5_000_000
+    assert row["deduction_amount"] == 800_000
+    tax_total = next(item for item in body["category_totals"] if item["name"] == "세금/이자")
+    salary_total = next(item for item in body["category_totals"] if item["name"] == "급여")
+    assert tax_total["transaction_type"] == "EXPENSE"
+    assert tax_total["current_amount"] == 800_000
+    assert salary_total["transaction_type"] == "INCOME"
+    assert salary_total["current_amount"] == 5_000_000

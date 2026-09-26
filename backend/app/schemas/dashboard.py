@@ -44,6 +44,8 @@ class DashboardTransactionRow(BaseModel):
     merchant: str | None
     memo: str | None
     has_attachment: bool
+    gross_amount: int | None = None
+    deduction_amount: int | None = None
 
 
 class DashboardCategoryTotal(BaseModel):

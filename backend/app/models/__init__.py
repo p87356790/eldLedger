@@ -15,6 +15,7 @@ from app.models.enums import (
     RecordStatus,
     Scope,
     TransactionType,
+    TransactionItemKind,
     UserRole,
 )
 from app.models.import_profile import ImportProfile
@@ -52,6 +53,7 @@ __all__ = [
     "TransactionItem",
     "TransactionTag",
     "TransactionType",
+    "TransactionItemKind",
     "User",
     "UserRole",
 ]

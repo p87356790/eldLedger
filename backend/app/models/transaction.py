@@ -13,7 +13,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
-from app.models.enums import IntPKMixin, RecordStatus, Scope, TimestampMixin, TransactionType
+from app.models.enums import IntPKMixin, RecordStatus, Scope, TimestampMixin, TransactionItemKind, TransactionType
 
 
 class Transaction(IntPKMixin, TimestampMixin, Base):
@@ -121,6 +121,11 @@ class TransactionItem(IntPKMixin, TimestampMixin, Base):
     )
     memo: Mapped[str | None] = mapped_column(String(255), nullable=True)
     line_no: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    line_kind: Mapped[TransactionItemKind] = mapped_column(
+        Enum(TransactionItemKind, native_enum=False, length=32),
+        default=TransactionItemKind.STANDARD,
+        nullable=False,
+    )
 
     transaction: Mapped["Transaction"] = relationship("Transaction", back_populates="items")
     category: Mapped["Category | None"] = relationship("Category", back_populates="items")

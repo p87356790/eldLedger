@@ -12,6 +12,7 @@ export { getOrganizationId };
 export type { AuditLogItem, AuthResponse, AuthUser, UserRole } from "./session";
 
 export type TransactionType = "INCOME" | "EXPENSE" | "TRANSFER";
+export type TransactionItemKind = "STANDARD" | "DEDUCTION";
 export type Scope = "PERSONAL" | "BUSINESS" | "MIXED";
 export type CategoryDefaultScope = "PERSONAL" | "BUSINESS" | "COMMON";
 export type RecordStatus = "DRAFT" | "CONFIRMED" | "REVERSED";
@@ -65,6 +66,7 @@ export interface TransactionItem {
   scope: Scope;
   memo: string | null;
   line_no: number;
+  line_kind?: TransactionItemKind;
 }
 
 export interface Attachment {
@@ -120,6 +122,7 @@ export interface TransactionCreatePayload {
     scope: Scope;
     memo: string | null;
     line_no: number;
+    line_kind?: TransactionItemKind;
   }>;
   tag_ids: number[];
 }
@@ -316,6 +319,8 @@ export interface DashboardTransactionRow {
   merchant: string | null;
   memo: string | null;
   has_attachment: boolean;
+  gross_amount?: number | null;
+  deduction_amount?: number | null;
 }
 
 export interface DashboardSummaryResponse {

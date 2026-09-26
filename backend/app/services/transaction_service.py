@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Account, Attachment, Category, Organization, Transaction, TransactionItem, TransactionTag
-from app.models.enums import RecordStatus, Scope, TransactionType
+from app.models.enums import RecordStatus, Scope, TransactionItemKind, TransactionType
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.accounting import DuplicateCheckRequest, TransactionCreate, TransactionItemCreate, TransactionUpdate
 from app.services.accounting_service import AccountingError, AccountingService
@@ -251,6 +251,7 @@ def _item_from_payload(item: TransactionItemCreate) -> TransactionItem:
         scope=item.scope,
         memo=item.memo,
         line_no=item.line_no,
+        line_kind=item.line_kind,
     )
 
 
@@ -267,9 +268,10 @@ def _merchant_key(value: str | None) -> str:
     return " ".join(value.split()).casefold()
 
 
-def _item_signature(items: list[TransactionItemCreate] | list[TransactionItem]) -> tuple[tuple[int | None, int, str], ...]:
-    rows: list[tuple[int | None, int, str]] = []
+def _item_signature(items: list[TransactionItemCreate] | list[TransactionItem]) -> tuple[tuple[int | None, int, str, str], ...]:
+    rows: list[tuple[int | None, int, str, str]] = []
     for item in items:
         scope = item.scope.value if isinstance(item.scope, Scope) else str(item.scope)
-        rows.append((item.category_id, int(item.amount), scope))
+        kind = item.line_kind.value if isinstance(item.line_kind, TransactionItemKind) else str(getattr(item, "line_kind", "STANDARD"))
+        rows.append((item.category_id, int(item.amount), scope, kind))
     return tuple(sorted(rows))

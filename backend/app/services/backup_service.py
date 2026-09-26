@@ -432,6 +432,7 @@ class BackupService:
                     scope=item.scope,
                     memo=item.memo,
                     line_no=item.line_no,
+                    line_kind=item.line_kind,
                 )
                 for item in transaction.items
             ],
@@ -712,6 +713,7 @@ class BackupService:
                             scope=item.scope,
                             memo=item.memo,
                             line_no=item.line_no,
+                            line_kind=item.line_kind,
                         )
                     )
             saved = self._transactions.create(

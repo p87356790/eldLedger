@@ -8,6 +8,7 @@ from app.models import Account, Category, JournalEntry, JournalLine, Transaction
 from app.models.enums import NormalBalance, RecordStatus, Scope, TransactionType
 from app.repositories.journal_repository import JournalRepository
 from app.services.journal_balance import assert_journal_balanced, collect_line_amounts
+from app.services.transaction_amounts import ItemAmountError, is_deduction_item, partition_items, validate_item_amounts
 
 
 class AccountingError(ValueError):
@@ -175,7 +176,7 @@ class AccountingService:
         lines: list[JournalLine] = []
         line_no = 1
         for item in items:
-            account = self._item_posting_account(item)
+            account = self._item_posting_account(item, expected_type=TransactionType.EXPENSE)
             lines.append(
                 JournalLine(
                     account_id=account.id,
@@ -201,6 +202,7 @@ class AccountingService:
 
     def _income_lines(self, transaction: Transaction) -> list[JournalLine]:
         items = self._required_items(transaction)
+        standard_items, deduction_items = partition_items(items)
         payment = self._require_postable_account(transaction.payment_account_id, "입금계좌")
         lines: list[JournalLine] = [
             JournalLine(
@@ -212,8 +214,21 @@ class AccountingService:
             )
         ]
         line_no = 2
-        for item in items:
-            account = self._item_posting_account(item)
+        for item in deduction_items:
+            account = self._item_posting_account(item, expected_type=TransactionType.EXPENSE)
+            lines.append(
+                JournalLine(
+                    account_id=account.id,
+                    debit_amount=item.amount,
+                    credit_amount=0,
+                    memo=item.memo or transaction.memo,
+                    line_no=line_no,
+                    transaction_item_id=item.id,
+                )
+            )
+            line_no += 1
+        for item in standard_items:
+            account = self._item_posting_account(item, expected_type=TransactionType.INCOME)
             lines.append(
                 JournalLine(
                     account_id=account.id,
@@ -255,24 +270,42 @@ class AccountingService:
         items = _ordered_items(transaction.items)
         if not items:
             raise AccountingError("수입/지출 거래는 분류 항목이 필요합니다.")
-        item_total = sum(item.amount for item in items)
-        if item_total != transaction.amount:
-            raise AccountingError("항목 금액 합계가 거래 금액과 일치해야 합니다.")
+        try:
+            validate_item_amounts(
+                transaction_type=transaction.transaction_type,
+                amount=transaction.amount,
+                items=items,
+            )
+        except ItemAmountError as exc:
+            raise AccountingError(str(exc)) from exc
         if transaction.scope == Scope.MIXED and any(item.scope == Scope.MIXED for item in items):
             raise AccountingError("혼합 거래의 각 항목은 개인 또는 사업으로 지정해야 합니다.")
         return items
 
-    def _item_posting_account(self, item: TransactionItem) -> Account:
+    def _item_posting_account(
+        self,
+        item: TransactionItem,
+        *,
+        expected_type: TransactionType | None = None,
+    ) -> Account:
         account: Account | None = item.account
         if account is None and item.account_id is not None:
             account = self._session.get(Account, item.account_id)
-        if account is None and item.category is not None:
-            account = item.category.account
-        if account is None and item.category_id is not None:
+        category: Category | None = item.category
+        if category is None and item.category_id is not None:
             category = self._session.get(Category, item.category_id)
             if category is None:
                 raise AccountingError("분류를 찾을 수 없습니다.")
-            account = self._session.get(Account, category.account_id)
+        if expected_type is not None and category is not None and category.transaction_type != expected_type:
+            if expected_type == TransactionType.INCOME:
+                raise AccountingError("수입 분류를 골라 주세요.")
+            if is_deduction_item(item):
+                raise AccountingError("공제 분류는 지출 항목에서 골라 주세요.")
+            raise AccountingError("지출 분류를 골라 주세요.")
+        if account is None and category is not None:
+            account = category.account
+            if account is None:
+                account = self._session.get(Account, category.account_id)
         if account is None:
             raise AccountingError("거래 항목에 분류 또는 계정과목이 필요합니다.")
         return self._ensure_postable(account, "분류 계정")
@@ -298,9 +331,14 @@ class AccountingService:
         if transaction.scope == Scope.MIXED and not transaction.items:
             raise AccountingError("혼합 거래는 개인/사업 항목 분할이 필요합니다.")
         if transaction.items:
-            item_total = sum(item.amount for item in transaction.items)
-            if item_total != transaction.amount:
-                raise AccountingError("항목 금액 합계가 거래 금액과 일치해야 합니다.")
+            try:
+                validate_item_amounts(
+                    transaction_type=transaction.transaction_type,
+                    amount=transaction.amount,
+                    items=transaction.items,
+                )
+            except ItemAmountError as exc:
+                raise AccountingError(str(exc)) from exc
         if transaction.transaction_type == TransactionType.TRANSFER and transaction.transfer_account_id is None:
             raise AccountingError("이체는 상대 계정이 필요합니다.")
 

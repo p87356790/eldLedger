@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.init_db import seed_standard_data
 from app.models import Account, Category, Organization
-from app.models.enums import Scope, TransactionType
+from app.models.enums import Scope, TransactionItemKind, TransactionType
 
 
 def _seed(db_session: Session) -> tuple[Organization, dict[str, Account], dict[str, Category]]:
@@ -289,3 +289,139 @@ def test_duplicate_check_finds_same_expense_and_transfer(client: TestClient, db_
         },
     )
     assert other_destination.json()["matches"] == []
+
+
+def test_income_with_deductions_is_one_transaction(client: TestClient, db_session: Session) -> None:
+    organization, accounts, categories = _seed(db_session)
+    response = client.post(
+        "/api/transactions",
+        json={
+            "organization_id": organization.id,
+            "occurred_on": "2026-09-25",
+            "transaction_type": TransactionType.INCOME.value,
+            "scope": Scope.PERSONAL.value,
+            "amount": 4_200_000,
+            "merchant": "근무처",
+            "memo": "9월 급여",
+            "payment_account_id": accounts["1200"].id,
+            "items": [
+                {
+                    "category_id": categories["급여"].id,
+                    "amount": 5_000_000,
+                    "scope": Scope.PERSONAL.value,
+                    "line_no": 1,
+                    "line_kind": TransactionItemKind.STANDARD.value,
+                },
+                {
+                    "category_id": categories["세금"].id,
+                    "amount": 800_000,
+                    "scope": Scope.PERSONAL.value,
+                    "line_no": 2,
+                    "line_kind": TransactionItemKind.DEDUCTION.value,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["amount"] == 4_200_000
+    assert created["transaction_type"] == "INCOME"
+    assert {item["line_kind"] for item in created["items"]} == {"STANDARD", "DEDUCTION"}
+
+    listed = client.get(f"/api/transactions?organization_id={organization.id}")
+    assert listed.status_code == 200
+    payload = listed.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["id"] == created["id"]
+    assert payload["items"][0]["amount"] == 4_200_000
+
+    trial = client.get(f"/api/reports/trial-balance?organization_id={organization.id}").json()
+    assert trial["is_balanced"] is True
+    bank = next(row for row in trial["rows"] if row["account_code"] == "1200")
+    salary = next(row for row in trial["rows"] if row["account_code"] == "4300")
+    tax = next(row for row in trial["rows"] if row["account_code"] == "6300")
+    assert bank["debit_total"] - bank["credit_total"] == 4_200_000
+    assert salary["credit_total"] - salary["debit_total"] == 5_000_000
+    assert tax["debit_total"] - tax["credit_total"] == 800_000
+
+
+def test_itemized_expense_stores_line_memos(client: TestClient, db_session: Session) -> None:
+    organization, accounts, categories = _seed(db_session)
+    response = client.post(
+        "/api/transactions",
+        json={
+            "organization_id": organization.id,
+            "occurred_on": "2026-09-20",
+            "transaction_type": TransactionType.EXPENSE.value,
+            "scope": Scope.PERSONAL.value,
+            "amount": 5_000,
+            "merchant": "이마트",
+            "payment_account_id": accounts["1100"].id,
+            "items": [
+                {
+                    "category_id": categories["식비"].id,
+                    "amount": 3_000,
+                    "scope": Scope.PERSONAL.value,
+                    "memo": "우유",
+                    "line_no": 1,
+                },
+                {
+                    "category_id": categories["식비"].id,
+                    "amount": 2_000,
+                    "scope": Scope.PERSONAL.value,
+                    "memo": "라면",
+                    "line_no": 2,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["amount"] == 5_000
+    assert [item["memo"] for item in created["items"]] == ["우유", "라면"]
+
+    trial = client.get(f"/api/reports/trial-balance?organization_id={organization.id}").json()
+    assert trial["is_balanced"] is True
+    cash = next(row for row in trial["rows"] if row["account_code"] == "1100")
+    food = next(row for row in trial["rows"] if row["account_code"] == "5400")
+    assert cash["credit_total"] - cash["debit_total"] == 5_000
+    assert food["debit_total"] - food["credit_total"] == 5_000
+
+
+def test_income_deduction_line_memos_are_stored(client: TestClient, db_session: Session) -> None:
+    organization, accounts, categories = _seed(db_session)
+    response = client.post(
+        "/api/transactions",
+        json={
+            "organization_id": organization.id,
+            "occurred_on": "2026-09-25",
+            "transaction_type": TransactionType.INCOME.value,
+            "scope": Scope.PERSONAL.value,
+            "amount": 4_200_000,
+            "merchant": "근무처",
+            "payment_account_id": accounts["1200"].id,
+            "items": [
+                {
+                    "category_id": categories["급여"].id,
+                    "amount": 5_000_000,
+                    "scope": Scope.PERSONAL.value,
+                    "memo": "기본급",
+                    "line_no": 1,
+                    "line_kind": TransactionItemKind.STANDARD.value,
+                },
+                {
+                    "category_id": categories["세금"].id,
+                    "amount": 800_000,
+                    "scope": Scope.PERSONAL.value,
+                    "memo": "국민연금",
+                    "line_no": 2,
+                    "line_kind": TransactionItemKind.DEDUCTION.value,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    memos = {item["line_kind"]: item["memo"] for item in created["items"]}
+    assert memos["STANDARD"] == "기본급"
+    assert memos["DEDUCTION"] == "국민연금"

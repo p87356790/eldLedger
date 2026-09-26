@@ -10,10 +10,12 @@ from app.models.enums import (
     NormalBalance,
     RecordStatus,
     Scope,
+    TransactionItemKind,
     TransactionType,
     UserRole,
 )
 from app.services.journal_balance import assert_journal_balanced
+from app.services.transaction_amounts import ItemAmountError, validate_item_amounts
 
 
 class ORMModel(BaseModel):
@@ -125,6 +127,7 @@ class TransactionItemCreate(BaseModel):
     scope: Scope
     memo: str | None = Field(default=None, max_length=255)
     line_no: int = 0
+    line_kind: TransactionItemKind = TransactionItemKind.STANDARD
 
 
 class TransactionItemRead(ORMModel):
@@ -136,6 +139,28 @@ class TransactionItemRead(ORMModel):
     scope: Scope
     memo: str | None
     line_no: int
+    line_kind: TransactionItemKind = TransactionItemKind.STANDARD
+
+
+def _validate_transaction_payload(
+    *,
+    transaction_type: TransactionType,
+    scope: Scope,
+    amount: int,
+    items: list[TransactionItemCreate],
+    transfer_account_id: int | None,
+) -> None:
+    try:
+        validate_item_amounts(transaction_type=transaction_type, amount=amount, items=items)
+    except ItemAmountError as exc:
+        raise ValueError(str(exc)) from exc
+    if scope == Scope.MIXED:
+        if not items:
+            raise ValueError("혼합 거래는 개인/사업 항목 분할이 필요합니다.")
+        if any(item.scope == Scope.MIXED for item in items):
+            raise ValueError("혼합 거래의 각 항목은 개인 또는 사업으로 지정해야 합니다.")
+    if transaction_type == TransactionType.TRANSFER and transfer_account_id is None:
+        raise ValueError("이체는 상대 계정이 필요합니다.")
 
 
 class TransactionCreate(BaseModel):
@@ -153,17 +178,13 @@ class TransactionCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_splits_and_transfer(self) -> Self:
-        if self.items:
-            item_total = sum(item.amount for item in self.items)
-            if item_total != self.amount:
-                raise ValueError("항목 금액 합계가 거래 금액과 일치해야 합니다.")
-        if self.scope == Scope.MIXED:
-            if not self.items:
-                raise ValueError("혼합 거래는 개인/사업 항목 분할이 필요합니다.")
-            if any(item.scope == Scope.MIXED for item in self.items):
-                raise ValueError("혼합 거래의 각 항목은 개인 또는 사업으로 지정해야 합니다.")
-        if self.transaction_type == TransactionType.TRANSFER and self.transfer_account_id is None:
-            raise ValueError("이체는 상대 계정이 필요합니다.")
+        _validate_transaction_payload(
+            transaction_type=self.transaction_type,
+            scope=self.scope,
+            amount=self.amount,
+            items=self.items,
+            transfer_account_id=self.transfer_account_id,
+        )
         return self
 
 
@@ -181,17 +202,13 @@ class TransactionUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_splits_and_transfer(self) -> Self:
-        if self.items:
-            item_total = sum(item.amount for item in self.items)
-            if item_total != self.amount:
-                raise ValueError("항목 금액 합계가 거래 금액과 일치해야 합니다.")
-        if self.scope == Scope.MIXED:
-            if not self.items:
-                raise ValueError("혼합 거래는 개인/사업 항목 분할이 필요합니다.")
-            if any(item.scope == Scope.MIXED for item in self.items):
-                raise ValueError("혼합 거래의 각 항목은 개인 또는 사업으로 지정해야 합니다.")
-        if self.transaction_type == TransactionType.TRANSFER and self.transfer_account_id is None:
-            raise ValueError("이체는 상대 계정이 필요합니다.")
+        _validate_transaction_payload(
+            transaction_type=self.transaction_type,
+            scope=self.scope,
+            amount=self.amount,
+            items=self.items,
+            transfer_account_id=self.transfer_account_id,
+        )
         return self
 
 
