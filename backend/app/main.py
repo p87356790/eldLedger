@@ -11,6 +11,7 @@ from app.db.init_db import init_db
 from app.routers import accounts as accounts_router
 from app.routers import auth as auth_router
 from app.routers import backup as backup_router
+from app.routers import bills as bills_router
 from app.routers import categories as categories_router
 from app.routers import dashboard as dashboard_router
 from app.routers import health as health_router
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     application.include_router(imports_router.router, prefix="/api/v1", dependencies=protected)
     application.include_router(dashboard_router.router, prefix="/api/v1", dependencies=protected)
     application.include_router(backup_router.router, prefix="/api/v1", dependencies=protected)
+    application.include_router(bills_router.router, prefix="/api/v1", dependencies=protected)
     application.include_router(transactions_router.router, prefix="/api", dependencies=protected)
     application.include_router(reports_router.router, prefix="/api", dependencies=protected)
     application.include_router(accounts_router.router, prefix="/api/v1", dependencies=protected)

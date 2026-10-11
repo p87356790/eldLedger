@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Alert, Box, Button, Card, CardContent, Stack, TextField, Typography } from "@mui/material";
 
-import { completeSetup, importLedgerBackup } from "../api/client";
+import { completeSetup, importLedgerBackup, isServerBackupRestore, logout } from "../api/client";
 import type { AuthUser } from "../api/client";
 
 interface SetupPageProps {
@@ -36,7 +36,11 @@ export function SetupPage({ organizationName, onReady }: SetupPageProps) {
       });
       const backup = backupRef.current?.files?.[0];
       if (backup != null) {
-        await importLedgerBackup(backup, false);
+        const imported = await importLedgerBackup(backup, false);
+        if (isServerBackupRestore(imported)) {
+          await logout();
+          throw new Error("서버 백업으로 복구했어요. 백업에 있던 아이디로 다시 로그인해 주세요.");
+        }
       }
       onReady(user);
     } catch (caught: unknown) {

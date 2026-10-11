@@ -248,6 +248,7 @@ def test_server_backup_requires_admin(client: TestClient, db_session: Session) -
         assert client.post("/api/v1/backup/server/run").status_code == 403
         assert client.delete("/api/v1/backup/server/files/eldledger-20260921-010203.zip").status_code == 403
         assert client.post("/api/v1/backup/server/files/delete", json={"filenames": ["eldledger-20260921-010203.zip"]}).status_code == 403
+        assert client.post("/api/v1/backup/server/files/eldledger-20260921-010203.zip/restore").status_code == 403
     finally:
         admin = db_session.scalar(select(User).where(User.username == "admin"))
         assert admin is not None
@@ -276,3 +277,69 @@ def test_run_if_due_creates_backup_once(db_session: Session, tmp_path: Path, mon
     assert first is not None
     second = service.run_if_due(now=now)
     assert second is None
+
+
+def _write_server_backup_zip(path: Path, db_bytes: bytes, uploads: dict[str, bytes] | None = None) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("database/eldledger.db", db_bytes)
+        for name, content in (uploads or {}).items():
+            archive.writestr(f"uploads/{name}", content)
+
+
+def test_restore_server_backup_replaces_database_and_uploads(
+    client: TestClient, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    (tmp_path / "database").mkdir()
+    (tmp_path / "uploads" / "2026-09").mkdir(parents=True)
+    (tmp_path / "database" / "eldledger.db").write_bytes(b"CURRENT-DB")
+    (tmp_path / "uploads" / "2026-09" / "old.jpg").write_bytes(b"old")
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    archive = backups / "eldledger-20260921-010203.zip"
+    _write_server_backup_zip(archive, b"RESTORED-DB", {"2026-09/receipt.jpg": b"jpeg-bytes"})
+
+    restored = client.post("/api/v1/backup/server/files/eldledger-20260921-010203.zip/restore")
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["database_restored"] is True
+    assert body["uploads_restored"] == 1
+    assert body["requires_relogin"] is True
+    assert (tmp_path / "database" / "eldledger.db").read_bytes() == b"RESTORED-DB"
+    assert (tmp_path / "uploads" / "2026-09" / "receipt.jpg").read_bytes() == b"jpeg-bytes"
+
+
+def test_restore_server_backup_folder(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    (tmp_path / "database").mkdir()
+    (tmp_path / "database" / "eldledger.db").write_bytes(b"CURRENT-DB")
+    folder = tmp_path / "backups" / "eldledger-20260915-010203"
+    (folder / "database").mkdir(parents=True)
+    (folder / "uploads" / "2026-08").mkdir(parents=True)
+    (folder / "database" / "eldledger.db").write_bytes(b"FOLDER-DB")
+    (folder / "uploads" / "2026-08" / "shot.png").write_bytes(b"png")
+
+    restored = client.post("/api/v1/backup/server/files/eldledger-20260915-010203/restore")
+    assert restored.status_code == 200, restored.text
+    assert (tmp_path / "database" / "eldledger.db").read_bytes() == b"FOLDER-DB"
+    assert (tmp_path / "uploads" / "2026-08" / "shot.png").read_bytes() == b"png"
+
+
+def test_import_full_server_backup_restores_files(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    (tmp_path / "database").mkdir()
+    (tmp_path / "database" / "eldledger.db").write_bytes(b"CURRENT-DB")
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("database/eldledger.db", b"UPLOADED-DB")
+        archive.writestr("uploads/2026-09/a.jpg", b"img")
+    restored = client.post(
+        "/api/v1/backup/import",
+        files={"file": ("eldledger-20260921-010203.zip", payload.getvalue(), "application/zip")},
+    )
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["requires_relogin"] is True
+    assert body["uploads_restored"] == 1
+    assert (tmp_path / "database" / "eldledger.db").read_bytes() == b"UPLOADED-DB"
+    assert (tmp_path / "uploads" / "2026-09" / "a.jpg").read_bytes() == b"img"

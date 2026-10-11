@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
@@ -54,6 +54,17 @@ import {
 } from "../utils/dates";
 import { formatWon, formatWonWithSymbol } from "../utils/money";
 import { KIND_LABEL, KIND_ORDER, groupWallets } from "../utils/wallets";
+
+const dashboardCache = new Map<string, DashboardSummaryResponse>();
+
+function dashboardCacheKey(
+  startDate: string,
+  endDate: string,
+  accountId: number | "all",
+  scope: DashboardScopeFilter,
+): string {
+  return `${startDate}|${endDate}|${accountId}|${scope}`;
+}
 import { ReceiptViewerDialog } from "./ReceiptViewerDialog";
 import type { ReceiptViewerTarget } from "./ReceiptViewerDialog";
 import { CategoryCompareCard } from "./CategoryCompareCard";
@@ -117,7 +128,14 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
     [groupedWallets],
   );
 
+  const requestSeq = useRef(0);
+
   const loadSummary = useCallback(async (): Promise<void> => {
+    const key = dashboardCacheKey(startDate, endDate, accountId, scope);
+    const seq = requestSeq.current + 1;
+    requestSeq.current = seq;
+    const cached = dashboardCache.get(key);
+    setData(cached ?? null);
     try {
       const summary = await fetchDashboardSummary({
         startDate,
@@ -125,9 +143,38 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
         accountId: accountId === "all" ? null : accountId,
         scope,
       });
+      dashboardCache.set(key, summary);
+      if (seq !== requestSeq.current) {
+        return;
+      }
       setData(summary);
       setLoadError(null);
+      const shown = splitIsoDate(startDate);
+      if (startDate === monthStartIso(shown.year, shown.month) && endDate === monthEndIso(shown.year, shown.month)) {
+        for (const delta of [-1, 1]) {
+          const neighbor = shiftYearMonth(shown.year, shown.month, delta);
+          const neighborStart = monthStartIso(neighbor.year, neighbor.month);
+          const neighborEnd = monthEndIso(neighbor.year, neighbor.month);
+          const neighborKey = dashboardCacheKey(neighborStart, neighborEnd, accountId, scope);
+          if (dashboardCache.has(neighborKey)) {
+            continue;
+          }
+          void fetchDashboardSummary({
+            startDate: neighborStart,
+            endDate: neighborEnd,
+            accountId: accountId === "all" ? null : accountId,
+            scope,
+          })
+            .then((neighborSummary) => {
+              dashboardCache.set(neighborKey, neighborSummary);
+            })
+            .catch(() => undefined);
+        }
+      }
     } catch (caught: unknown) {
+      if (seq !== requestSeq.current || cached !== undefined) {
+        return;
+      }
       setLoadError(caught instanceof Error ? caught.message : "대시보드를 불러오지 못했어요.");
     }
   }, [accountId, endDate, scope, startDate]);
@@ -137,11 +184,14 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
   }, [loadSummary]);
 
   const applyMonth = (nextYear: number, nextMonth: number): void => {
+    const nextStart = monthStartIso(nextYear, nextMonth);
+    const nextEnd = monthEndIso(nextYear, nextMonth);
     setYear(nextYear);
     setMonth(nextMonth);
-    setStartDate(monthStartIso(nextYear, nextMonth));
-    setEndDate(monthEndIso(nextYear, nextMonth));
+    setStartDate(nextStart);
+    setEndDate(nextEnd);
     setSelectedDate(null);
+    setData(dashboardCache.get(dashboardCacheKey(nextStart, nextEnd, accountId, scope)) ?? null);
   };
 
   const dailyByDate = useMemo(() => {
@@ -173,6 +223,7 @@ export function DashboardPage({ wallets, accounts, categories, tags, onRefresh }
   const totalAssets = activeWallets.reduce((sum, wallet) => sum + wallet.current_balance, 0);
 
   const handleSaved = async (): Promise<void> => {
+    dashboardCache.clear();
     await onRefresh();
     await loadSummary();
   };

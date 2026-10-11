@@ -10,8 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
-from app.models import Account, Attachment, AutoCategoryRule, Category, Organization, Transaction, User
-from app.models.enums import PaymentInstrumentKind, RecordStatus, TransactionType
+from app.models import Account, Attachment, AutoCategoryRule, Bill, Category, Organization, Transaction, User
+from app.models.enums import BillStatus, PaymentInstrumentKind, RecordStatus, TransactionType
 from app.models.journal import JournalLine
 from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
@@ -26,6 +26,7 @@ from app.schemas.backup import (
     LEDGER_FORMAT,
     LEDGER_VERSION,
     LedgerAttachment,
+    LedgerBill,
     LedgerBundle,
     LedgerCategory,
     LedgerImportResult,
@@ -43,10 +44,19 @@ from app.services.accounting_service import AccountingError
 from app.services.audit_service import AuditService
 from app.services.category_service import CategoryService
 from app.services.csv_import_service import CsvImportService
+from app.services.server_backup_service import find_database_member, is_full_server_backup_zip
 from app.services.tag_service import TagService
 from app.services.transaction_service import TransactionService
 
 MAX_BACKUP_BYTES = 50 * 1024 * 1024
+FULL_BACKUP_IMPORT_HINT = (
+    "이 파일은 장부 ZIP(ledger.json)이 아니라 서버 전체 백업(데이터베이스+영수증)입니다. "
+    "설정 → 저장된 백업에서 「이 백업으로 복구」를 누르거나, 서버의 data 폴더를 통째로 복사해 주세요."
+)
+LEDGER_JSON_MISSING_HINT = (
+    "백업 ZIP에 ledger.json 이 없어요. 「전체 백업 받기」로 받은 장부 파일이 맞는지 확인해 주세요. "
+    "「지금 전체 백업」으로 만든 파일은 저장된 백업 목록의 「이 백업으로 복구」를 쓰세요."
+)
 CARD_KIND = PaymentInstrumentKind.CREDIT_CARD
 
 
@@ -88,14 +98,20 @@ class BackupService:
         return buffer.getvalue()
 
     def import_zip(self, user: User, payload: bytes, *, replace: bool = False) -> LedgerImportResult:
+        if is_full_server_backup_zip(payload):
+            raise AccountingError(FULL_BACKUP_IMPORT_HINT)
         if len(payload) > MAX_BACKUP_BYTES:
-            raise AccountingError("백업 파일은 50MB를 넘을 수 없어요.")
+            raise AccountingError(
+                "장부 백업(ledger.json)은 50MB를 넘을 수 없어요. "
+                "「지금 전체 백업」으로 만든 파일은 저장된 백업 목록의 「이 백업으로 복구」를 쓰세요."
+            )
         bundle, files = _read_bundle(payload)
         existing = self._active_transactions(user)
         replaced = 0
         if existing:
             if not replace:
                 raise LedgerConflictError("이미 거래가 있어요. 덮어쓰기를 선택한 뒤에 가져올 수 있어요.")
+            self._delete_user_bills(user)
             for transaction in existing:
                 self._transactions.cancel(transaction.id)
                 replaced += 1
@@ -346,6 +362,7 @@ class BackupService:
         tags = self._tag_repo.list_tags(user.organization_id, owner_user_id=user.id)
         rules = self._import_repo.list_rules(user.organization_id, owner_user_id=user.id)
         transactions = self._active_transactions(user)
+        bills = self._user_bills(user)
         return LedgerBundle(
             format=LEDGER_FORMAT,
             version=LEDGER_VERSION,
@@ -395,6 +412,7 @@ class BackupService:
                 for rule in rules
             ],
             transactions=[self._transaction_row(row) for row in transactions],
+            bills=[self._bill_row(row) for row in bills],
         )
 
     def _transaction_row(self, transaction: Transaction) -> LedgerTransaction:
@@ -468,7 +486,7 @@ class BackupService:
         category_map = self._restore_categories(user, bundle.categories)
         tag_map = self._restore_tags(user, bundle.tags)
         rules_created = self._restore_rules(user, bundle.rules, wallet_map, category_map, tag_map)
-        created_txs, created_files = self._restore_transactions(
+        created_txs, created_files, transaction_ids = self._restore_transactions(
             user,
             bundle.transactions,
             wallet_map,
@@ -476,6 +494,7 @@ class BackupService:
             tag_map,
             files,
         )
+        bills_created = self._restore_bills(user, bundle.bills, wallet_map, category_map, transaction_ids)
         return LedgerImportResult(
             wallets_created=wallet_map.created,
             wallets_matched=wallet_map.matched,
@@ -485,6 +504,7 @@ class BackupService:
             rules_created=rules_created,
             transactions_created=created_txs,
             attachments_created=created_files,
+            bills_created=bills_created,
             replaced_transactions=0,
         )
 
@@ -688,9 +708,10 @@ class BackupService:
         categories: "_IdMap",
         tags: "_IdMap",
         files: dict[str, bytes],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, dict[int, int]]:
         created = 0
         attachments = 0
+        transaction_ids: dict[int, int] = {}
         for row in sorted(rows, key=lambda item: (item.occurred_on, item.id)):
             payment_id = wallets.ids.get(row.payment_account_id)
             if payment_id is None:
@@ -733,6 +754,7 @@ class BackupService:
                 created_by_user_id=user.id,
             )
             created += 1
+            transaction_ids[row.id] = saved.id
             for spec in row.attachments:
                 content = files.get(spec.path)
                 if content is None:
@@ -744,7 +766,81 @@ class BackupService:
                     content_type=spec.content_type,
                 )
                 attachments += 1
-        return created, attachments
+        return created, attachments, transaction_ids
+
+    def _bill_row(self, bill: Bill) -> LedgerBill:
+        return LedgerBill(
+            id=bill.id,
+            title=bill.title,
+            amount=int(bill.amount),
+            category_id=bill.category_id,
+            scope=bill.scope,
+            billed_on=bill.billed_on,
+            pay_on=bill.pay_on,
+            memo=bill.memo,
+            payment_account_id=bill.payment_account_id,
+            repeats_monthly=bill.repeats_monthly,
+            status=bill.status,
+            paid_on=bill.paid_on,
+            transaction_id=bill.transaction_id,
+        )
+
+    def _restore_bills(
+        self,
+        user: User,
+        rows: list[LedgerBill],
+        wallets: "_IdMap",
+        categories: "_IdMap",
+        transaction_ids: dict[int, int],
+    ) -> int:
+        created = 0
+        for row in rows:
+            category_id = categories.ids.get(row.category_id)
+            if category_id is None:
+                continue
+            payment_id = wallets.ids.get(row.payment_account_id) if row.payment_account_id is not None else None
+            transaction_id = transaction_ids.get(row.transaction_id) if row.transaction_id is not None else None
+            status = row.status
+            if status == BillStatus.PAID and row.transaction_id is not None and transaction_id is None:
+                status = BillStatus.OPEN
+                transaction_id = None
+            self._session.add(
+                Bill(
+                    organization_id=user.organization_id,
+                    created_by_user_id=user.id,
+                    title=row.title,
+                    amount=row.amount,
+                    category_id=category_id,
+                    scope=row.scope,
+                    billed_on=row.billed_on,
+                    pay_on=row.pay_on,
+                    memo=row.memo,
+                    payment_account_id=payment_id,
+                    repeats_monthly=row.repeats_monthly,
+                    status=status,
+                    paid_on=row.paid_on if status == BillStatus.PAID else None,
+                    transaction_id=transaction_id,
+                )
+            )
+            created += 1
+        if created:
+            self._session.flush()
+        return created
+
+    def _user_bills(self, user: User) -> list[Bill]:
+        return list(
+            self._session.scalars(
+                select(Bill)
+                .where(Bill.organization_id == user.organization_id)
+                .where(Bill.created_by_user_id == user.id)
+                .order_by(Bill.billed_on.asc(), Bill.id.asc())
+            )
+        )
+
+    def _delete_user_bills(self, user: User) -> None:
+        for bill in self._user_bills(user):
+            self._session.delete(bill)
+        self._session.flush()
 
     def _active_transactions(self, user: User) -> list[Transaction]:
         return list(
@@ -802,7 +898,9 @@ def _read_bundle(payload: bytes) -> tuple[LedgerBundle, dict[str, bytes]]:
                 names = archive.namelist()
                 ledger_name = next((name for name in names if name.endswith("ledger.json")), None)
                 if ledger_name is None:
-                    raise AccountingError("백업 파일에 ledger.json 이 없어요.")
+                    if find_database_member(names) is not None:
+                        raise AccountingError(FULL_BACKUP_IMPORT_HINT)
+                    raise AccountingError(LEDGER_JSON_MISSING_HINT)
                 bundle = LedgerBundle.model_validate_json(archive.read(ledger_name))
                 files = {
                     name.replace("\\", "/"): archive.read(name)

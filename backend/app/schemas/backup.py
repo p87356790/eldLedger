@@ -3,7 +3,14 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.enums import CategoryDefaultScope, PaymentInstrumentKind, Scope, TransactionItemKind, TransactionType
+from app.models.enums import (
+    BillStatus,
+    CategoryDefaultScope,
+    PaymentInstrumentKind,
+    Scope,
+    TransactionItemKind,
+    TransactionType,
+)
 
 LEDGER_FORMAT = "eldledger-ledger"
 LEDGER_VERSION = 1
@@ -81,6 +88,22 @@ class LedgerTransaction(BaseModel):
     attachments: list[LedgerAttachment] = Field(default_factory=list)
 
 
+class LedgerBill(BaseModel):
+    id: int
+    title: str = Field(..., min_length=1, max_length=255)
+    amount: int = Field(..., gt=0)
+    category_id: int
+    scope: Scope
+    billed_on: date
+    pay_on: date | None = None
+    memo: str | None = None
+    payment_account_id: int | None = None
+    repeats_monthly: bool = False
+    status: BillStatus
+    paid_on: date | None = None
+    transaction_id: int | None = None
+
+
 class LedgerBundle(BaseModel):
     format: str = LEDGER_FORMAT
     version: int = LEDGER_VERSION
@@ -91,6 +114,7 @@ class LedgerBundle(BaseModel):
     tags: list[LedgerTag] = Field(default_factory=list)
     rules: list[LedgerRule] = Field(default_factory=list)
     transactions: list[LedgerTransaction] = Field(default_factory=list)
+    bills: list[LedgerBill] = Field(default_factory=list)
 
 
 class LedgerImportResult(BaseModel):
@@ -102,6 +126,7 @@ class LedgerImportResult(BaseModel):
     rules_created: int
     transactions_created: int
     attachments_created: int
+    bills_created: int = 0
     replaced_transactions: int
 
 
@@ -176,3 +201,10 @@ class ServerBackupDeleteRequest(BaseModel):
 
 class ServerBackupDeleteResult(BaseModel):
     deleted: list[str]
+
+
+class ServerBackupRestoreResult(BaseModel):
+    filename: str
+    database_restored: bool
+    uploads_restored: int
+    requires_relogin: bool = True

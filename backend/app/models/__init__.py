@@ -4,10 +4,12 @@ from app.models.account import Account
 from app.models.attachment import Attachment
 from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.bill import Bill
 from app.models.category import Category
 from app.models.auto_category_rule import AutoCategoryRule, AutoCategoryRuleTag
 from app.models.enums import (
     AccountType,
+    BillStatus,
     CategoryDefaultScope,
     CsvAmountMode,
     NormalBalance,
@@ -33,6 +35,8 @@ __all__ = [
     "Attachment",
     "AuditLog",
     "AutoCategoryRule",
+    "Bill",
+    "BillStatus",
     "AutoCategoryRuleTag",
     "Base",
     "Category",

@@ -8,6 +8,7 @@ from app.db.init_db import seed_standard_data
 from app.models import Account, Category, JournalEntry, JournalLine, Transaction, TransactionItem
 from app.models.enums import RecordStatus, Scope, TransactionItemKind, TransactionType
 from app.services.accounting_service import AccountingError, AccountingService
+from app.services.ledger_service import LedgerService
 
 
 def _account(session: Session, code: str) -> Account:
@@ -209,6 +210,41 @@ def test_correct_confirmed_transaction_reverses_then_reposts(db_session: Session
     assert _line_for_account(replacement, housing.id).debit_amount == 55_000
     assert transaction.status == RecordStatus.CONFIRMED
     assert replacement.id != original_id
+
+
+def test_corrected_income_wallet_balance_ignores_reversal(db_session: Session) -> None:
+    organization = seed_standard_data(db_session)
+    db_session.flush()
+    bank = _account(db_session, "1200")
+    sales_category = _category(db_session, "매출")
+    service = AccountingService(db_session)
+
+    transaction = Transaction(
+        organization_id=organization.id,
+        occurred_on=date(2026, 2, 10),
+        transaction_type=TransactionType.INCOME,
+        scope=Scope.BUSINESS,
+        amount=3_000_000,
+        payment_account_id=bank.id,
+        items=[
+            TransactionItem(
+                category_id=sales_category.id,
+                amount=3_000_000,
+                scope=Scope.BUSINESS,
+                line_no=1,
+            )
+        ],
+    )
+    service.post_transaction(transaction)
+    ledger = LedgerService(db_session)
+    before = ledger.account_ledgers(organization_id=organization.id, account_id=bank.id)[0]
+    assert before.closing_balance == 3_000_000
+
+    transaction.memo = "수정"
+    service.correct_transaction(transaction)
+    after = ledger.account_ledgers(organization_id=organization.id, account_id=bank.id)[0]
+    assert after.closing_balance == 3_000_000
+    assert all("역분개" not in (line.description or "") for line in after.lines)
 
 
 def test_repost_without_reversal_is_rejected(db_session: Session) -> None:

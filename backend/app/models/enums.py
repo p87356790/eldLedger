@@ -63,6 +63,13 @@ class RecordStatus(str, Enum):
     REVERSED = "REVERSED"
 
 
+class BillStatus(str, Enum):
+    """A received bill sits open until the user records the real payment."""
+
+    OPEN = "OPEN"
+    PAID = "PAID"
+
+
 class UserRole(str, Enum):
     ADMIN = "ADMIN"
     USER = "USER"

@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from datetime import date
 
 from sqlalchemy import Select, func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, noload, selectinload
 
 from app.models import Category, Transaction, TransactionItem, TransactionTag
 from app.models.enums import RecordStatus, Scope, TransactionType
@@ -90,7 +90,7 @@ class TransactionRepository:
                 selectinload(Transaction.items).selectinload(TransactionItem.category).selectinload(Category.parent),
                 selectinload(Transaction.payment_account),
                 selectinload(Transaction.transfer_account),
-                selectinload(Transaction.attachments),
+                noload(Transaction.attachments),
             )
             .where(Transaction.organization_id == organization_id)
             .where(Transaction.created_by_user_id == created_by_user_id)

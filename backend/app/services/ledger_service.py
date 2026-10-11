@@ -47,6 +47,7 @@ class LedgerService:
         date_to: date | None = None,
         account_id: int | None = None,
         business_only: bool = False,
+        include_reversals: bool = False,
     ) -> list[LedgerLine]:
         stmt = (
             select(JournalLine, JournalEntry, Account, Transaction, TransactionItem)
@@ -58,6 +59,8 @@ class LedgerService:
             .where(JournalEntry.status == RecordStatus.CONFIRMED)
             .order_by(JournalEntry.occurred_on, JournalEntry.id, JournalLine.line_no, JournalLine.id)
         )
+        if not include_reversals:
+            stmt = stmt.where(JournalEntry.reverses_entry_id.is_(None))
         if date_from is not None:
             stmt = stmt.where(JournalEntry.occurred_on >= date_from)
         if date_to is not None:
@@ -144,6 +147,7 @@ class LedgerService:
             date_to=date_to,
             account_id=account_id,
             business_only=business_only,
+            include_reversals=True,
         ):
             grouped[line.journal_entry_id].append(line)
 

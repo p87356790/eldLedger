@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import DownloadIcon from "@mui/icons-material/Download";
+import RestoreOutlinedIcon from "@mui/icons-material/RestoreOutlined";
 import {
   Alert,
   Box,
@@ -34,6 +35,8 @@ import {
   fetchServerBackups,
   importConfigFile,
   importLedgerBackup,
+  isServerBackupRestore,
+  restoreServerBackup,
   runServerBackup,
   saveBackupSchedule,
 } from "../api/client";
@@ -48,6 +51,7 @@ import type {
 interface DataBackupPageProps {
   isAdmin: boolean;
   onImported: () => Promise<void>;
+  onRestored: () => Promise<void>;
 }
 
 const WEEKDAYS: Array<{ value: number; label: string }> = [
@@ -65,6 +69,7 @@ function summarize(result: LedgerImportResult): string {
     `자산 ${result.wallets_created}개 추가 · ${result.wallets_matched}개 맞춤`,
     `분류 ${result.categories_created}개 추가 · ${result.categories_matched}개 맞춤`,
     `거래 ${result.transactions_created}건`,
+    result.bills_created > 0 ? `청구 ${result.bills_created}건` : null,
     result.attachments_created > 0 ? `증빙 ${result.attachments_created}개` : null,
     result.replaced_transactions > 0 ? `기존 거래 ${result.replaced_transactions}건 취소 후 복원` : null,
   ]
@@ -113,9 +118,10 @@ function formatDateTime(value: string | null): string {
   return parsed.toLocaleString("ko-KR");
 }
 
-export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
+export function DataBackupPage({ isAdmin, onImported, onRestored }: DataBackupPageProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const configFileRef = useRef<HTMLInputElement>(null);
+  const alertRef = useRef<HTMLDivElement>(null);
   const [replace, setReplace] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -131,7 +137,9 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
   const [runningBackup, setRunningBackup] = useState<boolean>(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [pendingDelete, setPendingDelete] = useState<string[] | null>(null);
+  const [pendingRestore, setPendingRestore] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
+  const [restoring, setRestoring] = useState<boolean>(false);
 
   const loadServerBackup = async (): Promise<void> => {
     const [nextSchedule, nextFiles] = await Promise.all([fetchBackupSchedule(), fetchServerBackups()]);
@@ -154,6 +162,12 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
     });
   }, [isAdmin]);
 
+  useEffect(() => {
+    if (error !== null || message !== null) {
+      alertRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [error, message]);
+
   const handleExport = async (): Promise<void> => {
     setError(null);
     setMessage(null);
@@ -174,6 +188,13 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
     setBusy(true);
     try {
       const result = await importLedgerBackup(file, replace);
+      if (isServerBackupRestore(result)) {
+        window.alert(
+          `서버 전체 백업으로 복구했어요. 영수증 ${result.uploads_restored}개를 넣었습니다. 다시 로그인해 주세요.`,
+        );
+        await onRestored();
+        return;
+      }
       await onImported();
       setMessage(`가져왔어요. ${summarize(result)}`);
     } catch (caught: unknown) {
@@ -291,9 +312,30 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
     }
   };
 
+  const handleConfirmRestore = async (): Promise<void> => {
+    if (pendingRestore === null) {
+      return;
+    }
+    setError(null);
+    setMessage(null);
+    setRestoring(true);
+    try {
+      const result = await restoreServerBackup(pendingRestore);
+      setPendingRestore(null);
+      window.alert(
+        `복구했어요 (${result.filename}). 영수증 ${result.uploads_restored}개를 넣었습니다. 다시 로그인해 주세요.`,
+      );
+      await onRestored();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "백업을 복구하지 못했어요.");
+    } finally {
+      setRestoring(false);
+    }
+  };
+
   return (
     <Stack spacing={2}>
-      <Stack spacing={0.5}>
+      <Stack spacing={0.5} ref={alertRef}>
         <Typography variant="h5" sx={{ fontWeight: 800 }}>
           데이터 백업/복원
         </Typography>
@@ -411,8 +453,8 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
               <Stack spacing={1.5}>
                 <Typography sx={{ fontWeight: 800 }}>저장된 백업 파일</Typography>
                 <Typography color="text.secondary">
-                  {schedule?.retention_days ?? 30}일이 지난 파일은 자동 삭제됩니다. 필요한 파일은 받아 두세요. 오른쪽에서
-                  고르거나 바로 지울 수 있어요.
+                  {schedule?.retention_days ?? 30}일이 지난 파일은 자동 삭제됩니다. 「이 백업으로 복구」는 서버의
+                  데이터베이스와 영수증을 그 시점으로 바꿉니다. 필요한 파일은 받아 두세요.
                 </Typography>
                 {files.length === 0 ? (
                   <Typography color="text.secondary">아직 저장된 백업이 없어요.</Typography>
@@ -468,6 +510,15 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
                               sx={{ minHeight: 44 }}
                             >
                               다운로드
+                            </Button>
+                            <Button
+                              size="small"
+                              startIcon={<RestoreOutlinedIcon />}
+                              disabled={restoring || deleting}
+                              onClick={() => setPendingRestore(file.filename)}
+                              sx={{ minHeight: 44 }}
+                            >
+                              이 백업으로 복구
                             </Button>
                             <Button
                               size="small"
@@ -545,7 +596,9 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
           <Stack spacing={1.5}>
             <Typography sx={{ fontWeight: 800 }}>전체 장부 가져오기</Typography>
             <Typography color="text.secondary">
-              백업 ZIP을 선택하세요. 같은 이름의 자산·분류는 맞추고, 없는 항목과 거래는 새로 만듭니다.
+              「전체 백업 받기」로 받은 장부 ZIP(ledger.json)을 넣으면 이 계정의 거래를 가져옵니다. 「지금 전체 백업」으로
+              만든 파일(데이터베이스+영수증)이면 서버 전체가 그 시점으로 바뀌고 다시 로그인해야 합니다. 실패 안내는 이
+              페이지 맨 위에 표시됩니다.
             </Typography>
             <FormControlLabel
               control={<Checkbox checked={replace} onChange={(event) => setReplace(event.target.checked)} />}
@@ -590,6 +643,23 @@ export function DataBackupPage({ isAdmin, onImported }: DataBackupPageProps) {
           </Button>
           <Button color="error" variant="contained" onClick={() => void handleConfirmDelete()} disabled={deleting}>
             {deleting ? "삭제 중…" : "삭제"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog open={pendingRestore !== null} onClose={restoring ? undefined : () => setPendingRestore(null)}>
+        <DialogTitle>이 백업으로 복구할까요?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {pendingRestore} 시점의 데이터베이스와 영수증으로 지금 서버를 바꿉니다. 이후에 입력한 내용은 사라지고, 모든
+            사람이 다시 로그인해야 합니다.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPendingRestore(null)} disabled={restoring}>
+            돌아가기
+          </Button>
+          <Button variant="contained" onClick={() => void handleConfirmRestore()} disabled={restoring}>
+            {restoring ? "복구 중…" : "복구하기"}
           </Button>
         </DialogActions>
       </Dialog>

@@ -1,15 +1,15 @@
 ---
-description: Release 요청 시 install zip과 함께 update(upgrade) zip을 항상 만든다
+description: 배포할 작업이 끝나면 요청 없이 install zip과 update(upgrade) zip을 만든다
 alwaysApply: true
 ---
 
 # Release와 Update를 항상 같이 만든다
 
-사용자가 `release`, `릴리스`, `배포 묶음`을 요청하면, 별도로 말하지 않아도 **Update 파일도 동시에** 만든다.
+사용자가 zip을 따로 말하지 않아도, **8080에 올릴 기능·화면·서버 작업을 끝내면** 자동으로 배포 묶음을 만든다. `release`, `릴리스`, `Update`, `upgrade`를 요청한 경우에도 같다.
 
-1. 헤더에 새 버전을 보여줘야 하면 `frontend/src/version.ts` 의 `APP_VERSION` 을 먼저 올린다. 표시는 `가계부 V00.01` 형식이다.
+1. `frontend/src/version.ts` 의 `APP_VERSION` 을 올린다. 표시는 `가계부 V00.01` 형식이다.
 2. `powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1` 을 실행한다.
-3. 결과 파일은 `release/` 에 둔다.
+3. 결과 파일은 `release/` 에 두고, Update zip 경로를 알려 준다.
 
 | 파일 | 사용자가 말한 것 | 용도 |
 | --- | --- | --- |
@@ -18,5 +18,6 @@ alwaysApply: true
 | `eldledger-날짜-data.zip` | (있을 때만) | 이 PC 장부를 다른 서버로 옮길 때 |
 
 - Update = `upgrade.zip` 이다. `upgrade.sh` / `upgrade.bat` 가 이 이름을 찾는다.
-- install만 만들고 upgrade를 빼지 않는다.
+- install만 만들고 upgrade를 빼지 않는다. 물어보지 않고 둘 다 만든다.
 - 장부 `data/` 실물은 upgrade zip에 넣지 않는다.
+- 문서만 고치거나 배포와 무관한 작업이면 zip을 만들지 않는다.

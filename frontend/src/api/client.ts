@@ -358,8 +358,202 @@ export function fetchDashboardSummary(params: {
   return getJson<DashboardSummaryResponse>(`/api/v1/dashboard/summary?${query.toString()}`);
 }
 
+export interface ReportQueryParams {
+  dateFrom?: string;
+  dateTo?: string;
+  accountId?: number | null;
+  businessOnly?: boolean;
+}
+
+export interface TransactionLedgerRow {
+  occurred_on: string;
+  account_code: string;
+  account_name: string;
+  description: string | null;
+  debit_amount: number;
+  credit_amount: number;
+  journal_entry_id: number;
+  transaction_id: number | null;
+}
+
+export interface JournalBookLine {
+  account_code: string;
+  account_name: string;
+  debit_amount: number;
+  credit_amount: number;
+  memo: string | null;
+}
+
+export interface JournalBookEntry {
+  journal_entry_id: number;
+  occurred_on: string;
+  description: string | null;
+  transaction_id: number | null;
+  debit_total: number;
+  credit_total: number;
+  lines: JournalBookLine[];
+}
+
+export interface AccountLedgerLine {
+  occurred_on: string;
+  description: string | null;
+  debit_amount: number;
+  credit_amount: number;
+  balance: number;
+  journal_entry_id: number;
+}
+
+export interface AccountLedger {
+  account_id: number;
+  account_code: string;
+  account_name: string;
+  account_type: string;
+  normal_balance: string;
+  debit_total: number;
+  credit_total: number;
+  closing_balance: number;
+  lines: AccountLedgerLine[];
+}
+
+export interface TrialBalanceRow {
+  account_id: number;
+  account_code: string;
+  account_name: string;
+  account_type: string;
+  debit_total: number;
+  credit_total: number;
+}
+
+export interface TrialBalanceResponse {
+  debit_total: number;
+  credit_total: number;
+  is_balanced: boolean;
+  rows: TrialBalanceRow[];
+}
+
+export interface BusinessReportSummary {
+  date_from: string | null;
+  date_to: string | null;
+  scope: Scope;
+  transaction_count: number;
+  income_total: number;
+  expense_total: number;
+  net_income: number;
+  trial_balance_debit_total: number;
+  trial_balance_credit_total: number;
+  is_balanced: boolean;
+}
+
+function reportQuery(params: ReportQueryParams): string {
+  const query = new URLSearchParams({
+    organization_id: String(getOrganizationId()),
+  });
+  if (params.dateFrom != null && params.dateFrom !== "") {
+    query.set("date_from", params.dateFrom);
+  }
+  if (params.dateTo != null && params.dateTo !== "") {
+    query.set("date_to", params.dateTo);
+  }
+  if (params.accountId != null) {
+    query.set("account_id", String(params.accountId));
+  }
+  if (params.businessOnly === true) {
+    query.set("business_only", "true");
+  }
+  return query.toString();
+}
+
+export function fetchTransactionLedger(params: ReportQueryParams): Promise<TransactionLedgerRow[]> {
+  return getJson<TransactionLedgerRow[]>(`/api/reports/transaction-ledger?${reportQuery(params)}`);
+}
+
+export function fetchJournalBook(params: ReportQueryParams): Promise<JournalBookEntry[]> {
+  return getJson<JournalBookEntry[]>(`/api/reports/journal-book?${reportQuery(params)}`);
+}
+
+export function fetchAccountLedgers(params: ReportQueryParams): Promise<AccountLedger[]> {
+  return getJson<AccountLedger[]>(`/api/reports/account-ledger?${reportQuery(params)}`);
+}
+
+export function fetchTrialBalance(params: ReportQueryParams): Promise<TrialBalanceResponse> {
+  return getJson<TrialBalanceResponse>(`/api/reports/trial-balance?${reportQuery(params)}`);
+}
+
+export function fetchBusinessReportSummary(params: ReportQueryParams): Promise<BusinessReportSummary> {
+  return getJson<BusinessReportSummary>(`/api/reports/business-summary?${reportQuery(params)}`);
+}
+
+export async function downloadBusinessExcel(params: ReportQueryParams): Promise<void> {
+  const response = await authorizedFetch(`/api/reports/business-excel?${reportQuery(params)}`);
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "사업자_회계자료.xlsx";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 export function createTransaction(payload: TransactionCreatePayload): Promise<Transaction> {
   return sendJson<Transaction>("/api/transactions", "POST", payload);
+}
+
+export type BillStatus = "OPEN" | "PAID";
+
+export interface Bill {
+  id: number;
+  organization_id: number;
+  created_by_user_id: number | null;
+  title: string;
+  amount: number;
+  category_id: number;
+  scope: Scope;
+  billed_on: string;
+  pay_on: string | null;
+  memo: string | null;
+  payment_account_id: number | null;
+  repeats_monthly: boolean;
+  status: BillStatus;
+  paid_on: string | null;
+  transaction_id: number | null;
+}
+
+export interface BillWritePayload {
+  title: string;
+  amount: number;
+  category_id: number;
+  scope: "PERSONAL" | "BUSINESS";
+  billed_on: string;
+  pay_on: string | null;
+  memo: string | null;
+  payment_account_id: number | null;
+  repeats_monthly: boolean;
+}
+
+export function fetchBills(organizationId: number = getOrganizationId()): Promise<Bill[]> {
+  return getJson<Bill[]>(`/api/v1/bills?organization_id=${organizationId}`);
+}
+
+export function createBill(payload: BillWritePayload & { organization_id: number }): Promise<Bill> {
+  return sendJson<Bill>("/api/v1/bills", "POST", payload);
+}
+
+export function updateBill(billId: number, payload: BillWritePayload): Promise<Bill> {
+  return sendJson<Bill>(`/api/v1/bills/${billId}`, "PATCH", payload);
+}
+
+export function deleteBill(billId: number): Promise<void> {
+  return sendJson<void>(`/api/v1/bills/${billId}`, "DELETE", {});
+}
+
+export function payBill(
+  billId: number,
+  payload: { occurred_on: string; payment_account_id: number },
+): Promise<Bill> {
+  return sendJson<Bill>(`/api/v1/bills/${billId}/pay`, "POST", payload);
 }
 
 export async function uploadAttachment(transactionId: number, file: File): Promise<Attachment> {
@@ -493,6 +687,7 @@ export interface LedgerImportResult {
   rules_created: number;
   transactions_created: number;
   attachments_created: number;
+  bills_created: number;
   replaced_transactions: number;
 }
 
@@ -547,7 +742,10 @@ export async function importConfigFile(file: File): Promise<ConfigImportResult> 
   return (await response.json()) as ConfigImportResult;
 }
 
-export async function importLedgerBackup(file: File, replace: boolean = false): Promise<LedgerImportResult> {
+export async function importLedgerBackup(
+  file: File,
+  replace: boolean = false,
+): Promise<LedgerImportResult | ServerBackupRestoreResult> {
   const body = new FormData();
   body.append("file", file);
   const query = replace ? "?replace=true" : "";
@@ -558,7 +756,7 @@ export async function importLedgerBackup(file: File, replace: boolean = false): 
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
-  return (await response.json()) as LedgerImportResult;
+  return (await response.json()) as LedgerImportResult | ServerBackupRestoreResult;
 }
 
 export type BackupFrequency = "daily" | "weekly" | "monthly";
@@ -602,6 +800,19 @@ export interface ServerBackupDeleteResult {
   deleted: string[];
 }
 
+export interface ServerBackupRestoreResult {
+  filename: string;
+  database_restored: boolean;
+  uploads_restored: number;
+  requires_relogin: boolean;
+}
+
+export function isServerBackupRestore(
+  value: LedgerImportResult | ServerBackupRestoreResult,
+): value is ServerBackupRestoreResult {
+  return "requires_relogin" in value;
+}
+
 export function fetchBackupSchedule(): Promise<BackupSchedule> {
   return getJson<BackupSchedule>("/api/v1/backup/server/settings");
 }
@@ -634,6 +845,16 @@ export async function downloadServerBackup(filename: string): Promise<void> {
   link.download = filename.endsWith(".zip") ? filename : `${filename}.zip`;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+export async function restoreServerBackup(filename: string): Promise<ServerBackupRestoreResult> {
+  const response = await authorizedFetch(`/api/v1/backup/server/files/${encodeURIComponent(filename)}/restore`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return (await response.json()) as ServerBackupRestoreResult;
 }
 
 export function deleteServerBackups(filenames: string[]): Promise<ServerBackupDeleteResult> {

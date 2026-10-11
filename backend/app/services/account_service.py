@@ -65,6 +65,10 @@ class AccountService:
     def get_wallet(self, account_id: int, *, owner_user_id: int | None = None) -> WalletAccountRead:
         return self._to_read(self._require_wallet(account_id, owner_user_id=owner_user_id))
 
+    def ensure_wallet(self, account_id: int, *, owner_user_id: int | None = None) -> None:
+        """Confirm the wallet exists without rebuilding its full balance."""
+        self._require_wallet(account_id, owner_user_id=owner_user_id)
+
     def create_wallet(self, payload: WalletAccountCreate, *, owner_user_id: int | None = None) -> WalletAccountRead:
         self._require_organization(payload.organization_id)
         if payload.currency != "KRW":

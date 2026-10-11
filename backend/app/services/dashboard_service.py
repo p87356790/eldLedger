@@ -3,9 +3,10 @@ from collections import defaultdict
 from datetime import date
 from typing import NamedTuple
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Category, Transaction, TransactionItem
+from app.models import Attachment, Category, Transaction, TransactionItem
 from app.models.enums import Scope, TransactionType
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.dashboard import (
@@ -40,7 +41,7 @@ class DashboardService:
         if resolved_start > resolved_end:
             raise ValueError("시작일이 종료일보다 늦을 수 없어요.")
         if account_id is not None:
-            self._accounts.get_wallet(account_id, owner_user_id=owner_user_id)
+            self._accounts.ensure_wallet(account_id, owner_user_id=owner_user_id)
 
         previous_start, previous_end = previous_month_bounds(resolved_start)
         query_start = min(resolved_start, previous_start)
@@ -55,6 +56,7 @@ class DashboardService:
         current_rows = [row for row in rows if resolved_start <= row.occurred_on <= resolved_end]
         previous_rows = [row for row in rows if previous_start <= row.occurred_on <= previous_end]
         matching = [row for row in current_rows if _matches_scope(row, scope)]
+        with_receipts = _transactions_with_receipts(self._session, [row.id for row in matching])
 
         total_income = 0
         total_expense = 0
@@ -97,7 +99,9 @@ class DashboardService:
                 business_profit=business_income - business_expense,
             ),
             daily=daily,
-            transactions=[_to_row(transaction, account_id, scope) for transaction in matching],
+            transactions=[
+                _to_row(transaction, account_id, scope, transaction.id in with_receipts) for transaction in matching
+            ],
             previous_start_date=previous_start,
             previous_end_date=previous_end,
             category_totals=_category_totals(matching, previous_rows, scope),
@@ -273,10 +277,20 @@ def _item_display_name(item: TransactionItem) -> str | None:
     return None
 
 
+def _transactions_with_receipts(session: Session, transaction_ids: list[int]) -> set[int]:
+    if not transaction_ids:
+        return set()
+    found = session.scalars(
+        select(Attachment.transaction_id).where(Attachment.transaction_id.in_(transaction_ids))
+    )
+    return set(found)
+
+
 def _to_row(
     transaction: Transaction,
     account_id: int | None = None,
     scope: DashboardScopeFilter = DashboardScopeFilter.ALL,
+    has_attachment: bool = False,
 ) -> DashboardTransactionRow:
     standard_items, deduction_items = partition_items(transaction.items)
     category_names = [
@@ -302,7 +316,7 @@ def _to_row(
         payment_method=payment,
         merchant=transaction.merchant,
         memo=transaction.memo,
-        has_attachment=len(transaction.attachments) > 0,
+        has_attachment=has_attachment,
         gross_amount=gross_amount,
         deduction_amount=deduction_amount,
     )

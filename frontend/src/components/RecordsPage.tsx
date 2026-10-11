@@ -36,22 +36,38 @@ export function RecordsPage({
   const [receiptTarget, setReceiptTarget] = useState<ReceiptViewerTarget | null>(null);
 
   return (
-    <>
+    <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {loadError !== null && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert severity="error" sx={{ mb: 2, flexShrink: 0 }}>
           {loadError}
         </Alert>
       )}
-      <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
+      <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2, flexShrink: 0 }}>
         <Button variant="outlined" onClick={() => onImportOpen(true)}>
           표 붙여넣기
         </Button>
       </Stack>
-      <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems="flex-start">
-        <Box sx={{ width: { xs: "100%", md: "58%" }, position: { md: "sticky" }, top: { md: 88 } }}>
+      <Stack direction={{ xs: "column", md: "row" }} spacing={2} sx={{ flex: 1, minHeight: 0 }}>
+        <Box
+          sx={{
+            width: { xs: "100%", md: "58%" },
+            flex: { xs: 1.15, md: "none" },
+            minHeight: 0,
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+          }}
+        >
           <TransactionForm accounts={accounts} categories={categories} tags={tags} onSaved={onRefresh} />
         </Box>
-        <Box sx={{ width: { xs: "100%", md: "42%" } }}>
+        <Box
+          sx={{
+            width: { xs: "100%", md: "42%" },
+            flex: { xs: 0.85, md: "none" },
+            minHeight: 0,
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+          }}
+        >
           <TransactionList
             transactions={transactions}
             accounts={accounts}
@@ -84,6 +100,6 @@ export function RecordsPage({
         onSaved={onRefresh}
       />
       <ReceiptViewerDialog target={receiptTarget} onClose={() => setReceiptTarget(null)} />
-    </>
+    </Box>
   );
 }

@@ -1,3 +1,4 @@
+import zipfile
 from datetime import date
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -11,6 +12,7 @@ from starlette.background import BackgroundTask
 
 from app.database import get_db
 from app.models import User
+from app.models.enums import UserRole
 from app.schemas.backup import (
     BackupScheduleRead,
     BackupScheduleUpdate,
@@ -20,15 +22,22 @@ from app.schemas.backup import (
     ServerBackupDeleteRequest,
     ServerBackupDeleteResult,
     ServerBackupFile,
+    ServerBackupRestoreResult,
     ServerBackupRunResult,
 )
 from app.security.deps import get_current_user, require_admin
 from app.services.accounting_service import AccountingError
-from app.services.backup_service import BackupService, LedgerConflictError, decode_backup_bytes
+from app.services.backup_service import (
+    BackupService,
+    FULL_BACKUP_IMPORT_HINT,
+    LedgerConflictError,
+    decode_backup_bytes,
+)
 from app.services.journal_balance import UnbalancedJournalError
 from app.services.server_backup_service import (
     BackupInProgressError,
     ServerBackupService,
+    is_full_server_backup_path,
     resolve_backup_path,
     zip_directory,
 )
@@ -49,6 +58,8 @@ def _unlink(path: str) -> None:
 
 
 def _import_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, BackupInProgressError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
     if isinstance(error, LedgerConflictError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
     if isinstance(error, AccountingError):
@@ -88,18 +99,40 @@ def export_ledger(
     )
 
 
-@router.post("/import", response_model=LedgerImportResult)
+@router.post("/import")
 async def import_ledger(
     replace: bool = Query(default=False),
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     service: BackupService = Depends(_service),
-) -> LedgerImportResult:
-    payload = await file.read()
+    server: ServerBackupService = Depends(_server_backup),
+) -> LedgerImportResult | ServerBackupRestoreResult:
+    handle = NamedTemporaryFile(suffix=Path(file.filename or "backup.zip").suffix or ".zip", delete=False)
     try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+        handle.close()
+        uploaded = Path(handle.name)
+        if is_full_server_backup_path(uploaded):
+            if user.role != UserRole.ADMIN:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=FULL_BACKUP_IMPORT_HINT)
+            return server.restore_uploaded_path(
+                uploaded,
+                filename=file.filename or uploaded.name,
+                user_id=user.id,
+            )
+        payload = uploaded.read_bytes()
         return service.import_zip(user, payload, replace=replace)
+    except HTTPException:
+        raise
     except Exception as error:
         raise _import_http_error(error) from error
+    finally:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
 
 
 @router.get("/config/export", response_model=ConfigBundle)
@@ -190,6 +223,22 @@ def delete_server_backup(
     except LookupError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     return ServerBackupDeleteResult(deleted=deleted)
+
+
+@router.post("/server/files/{filename}/restore", response_model=ServerBackupRestoreResult)
+def restore_server_backup(
+    filename: str,
+    user: User = Depends(require_admin),
+    service: ServerBackupService = Depends(_server_backup),
+) -> ServerBackupRestoreResult:
+    try:
+        return service.restore_file(filename, user_id=user.id)
+    except BackupInProgressError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except zipfile.BadZipFile as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="백업 ZIP을 읽지 못했어요.") from error
 
 
 @router.get("/server/files/{filename}", response_model=None)

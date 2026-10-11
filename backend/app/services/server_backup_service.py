@@ -11,6 +11,7 @@ import threading
 import zipfile
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 
 from sqlalchemy import select
@@ -18,12 +19,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Organization, Setting
+
 from app.schemas.backup import (
     BackupFrequency,
     BackupScheduleRead,
     BackupScheduleState,
     BackupScheduleUpdate,
     ServerBackupFile,
+    ServerBackupRestoreResult,
     ServerBackupRunResult,
 )
 from app.services.audit_service import AuditService
@@ -113,6 +116,140 @@ def zip_directory(source: Path, dest: Path) -> None:
                 archive.write(child, child.relative_to(source).as_posix())
 
 
+def _normalize_zip_name(name: str) -> str:
+    return name.replace("\\", "/").lstrip("./")
+
+
+def _safe_dest(root: Path, relative: str) -> Path | None:
+    dest = (root / relative).resolve()
+    try:
+        dest.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return dest
+
+
+def find_database_member(names: Sequence[str]) -> str | None:
+    normalized = [_normalize_zip_name(name) for name in names]
+    for candidate in ("database/eldledger.db", "data/database/eldledger.db"):
+        if candidate in normalized:
+            return names[normalized.index(candidate)]
+    for original, cleaned in zip(names, normalized, strict=False):
+        if cleaned.endswith("database/eldledger.db") and not cleaned.endswith("/"):
+            return original
+    return None
+
+
+def is_full_server_backup_zip(payload: bytes) -> bool:
+    if len(payload) < 4 or payload[:2] != b"PK":
+        return False
+    try:
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            return find_database_member(archive.namelist()) is not None
+    except zipfile.BadZipFile:
+        return False
+
+
+def is_full_server_backup_path(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return find_database_member(archive.namelist()) is not None
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def _dispose_engine() -> None:
+    from app.database import engine
+
+    if ":memory:" in settings.database_url:
+        return
+    engine.dispose()
+
+
+def _remove_sqlite_sidecars(db_path: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
+
+
+def restore_zip_archive(archive: zipfile.ZipFile, *, filename: str) -> ServerBackupRestoreResult:
+    names = archive.namelist()
+    db_member = find_database_member(names)
+    if db_member is None:
+        raise LookupError("백업에 database/eldledger.db 가 없어요.")
+    data_root = Path(settings.data_dir)
+    db_dest = data_root / "database" / "eldledger.db"
+    db_dest.parent.mkdir(parents=True, exist_ok=True)
+    _dispose_engine()
+    _remove_sqlite_sidecars(db_dest)
+    db_dest.unlink(missing_ok=True)
+    with archive.open(db_member) as source, db_dest.open("wb") as dest:
+        shutil.copyfileobj(source, dest)
+    uploads_root = data_root / "uploads"
+    restored_files = 0
+    for name in names:
+        cleaned = _normalize_zip_name(name)
+        if cleaned.endswith("/"):
+            continue
+        relative: str | None = None
+        if cleaned.startswith("uploads/"):
+            relative = cleaned.removeprefix("uploads/")
+        elif cleaned.startswith("data/uploads/"):
+            relative = cleaned.removeprefix("data/uploads/")
+        if relative is None or relative == "":
+            continue
+        dest = _safe_dest(uploads_root, relative)
+        if dest is None:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(name) as source, dest.open("wb") as out:
+            shutil.copyfileobj(source, out)
+        restored_files += 1
+    return ServerBackupRestoreResult(
+        filename=filename,
+        database_restored=True,
+        uploads_restored=restored_files,
+    )
+
+
+def restore_full_backup_path(path: Path) -> ServerBackupRestoreResult:
+    if path.is_dir():
+        db_source = path / "database" / "eldledger.db"
+        nested = path / "data" / "database" / "eldledger.db"
+        if not db_source.is_file() and nested.is_file():
+            db_source = nested
+        if not db_source.is_file():
+            raise LookupError("백업 폴더에 database/eldledger.db 가 없어요.")
+        data_root = Path(settings.data_dir)
+        db_dest = data_root / "database" / "eldledger.db"
+        db_dest.parent.mkdir(parents=True, exist_ok=True)
+        _dispose_engine()
+        _remove_sqlite_sidecars(db_dest)
+        shutil.copy2(db_source, db_dest)
+        uploads_source = path / "uploads"
+        if not uploads_source.is_dir() and (path / "data" / "uploads").is_dir():
+            uploads_source = path / "data" / "uploads"
+        restored_files = 0
+        if uploads_source.is_dir():
+            dest_uploads = data_root / "uploads"
+            dest_uploads.mkdir(parents=True, exist_ok=True)
+            for child in uploads_source.rglob("*"):
+                if not child.is_file():
+                    continue
+                target = _safe_dest(dest_uploads, child.relative_to(uploads_source).as_posix())
+                if target is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(child, target)
+                restored_files += 1
+        return ServerBackupRestoreResult(
+            filename=path.name,
+            database_restored=True,
+            uploads_restored=restored_files,
+        )
+    with zipfile.ZipFile(path) as archive:
+        return restore_zip_archive(archive, filename=path.name)
+
+
 class ServerBackupService:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -184,6 +321,37 @@ class ServerBackupService:
                 details=", ".join(deleted),
             )
         return deleted
+
+    def restore_file(self, filename: str, *, user_id: int | None = None) -> ServerBackupRestoreResult:
+        path = resolve_backup_path(filename)
+        return self._restore_locked(path, filename=path.name, user_id=user_id)
+
+    def restore_uploaded_path(
+        self,
+        path: Path,
+        *,
+        filename: str,
+        user_id: int | None = None,
+    ) -> ServerBackupRestoreResult:
+        return self._restore_locked(path, filename=filename, user_id=user_id)
+
+    def _restore_locked(
+        self,
+        path: Path,
+        *,
+        filename: str,
+        user_id: int | None,
+    ) -> ServerBackupRestoreResult:
+        if not _run_lock.acquire(blocking=False):
+            raise BackupInProgressError("백업이나 복구가 이미 진행 중이에요.")
+        try:
+            if ":memory:" not in settings.database_url:
+                self._session.close()
+            result = restore_full_backup_path(path)
+            logger.info("서버 백업 복구 완료: %s user=%s", filename, user_id)
+            return result.model_copy(update={"filename": filename})
+        finally:
+            _run_lock.release()
 
     def create_full_backup(self, organization_id: int, user_id: int | None = None) -> ServerBackupRunResult:
         if not _run_lock.acquire(blocking=False):

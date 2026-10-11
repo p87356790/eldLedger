@@ -310,3 +310,15 @@ def test_config_import_blocked_when_transactions_exist(
     )
     assert result.status_code == 400
     assert "거래가" in result.json()["detail"]
+
+
+def test_import_server_backup_zip_without_ledger_json_is_explained(client: TestClient) -> None:
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("readme.txt", "not a ledger")
+    response = client.post(
+        "/api/v1/backup/import",
+        files={"file": ("backup.zip", payload.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 400, response.text
+    assert "ledger.json" in response.json()["detail"]

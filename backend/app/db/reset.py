@@ -16,6 +16,7 @@ from app.db.init_db import STANDARD_ACCOUNTS, seed_standard_data
 from app.models import (
     Account,
     AutoCategoryRule,
+    Bill,
     Category,
     Organization,
     Tag,
@@ -63,6 +64,11 @@ def reset_user_ledger(session: Session, user: User) -> int:
         )
     )
     tx_count = len(transactions)
+    bills = list(session.scalars(select(Bill).where(Bill.created_by_user_id == user.id)))
+    for bill in bills:
+        session.delete(bill)
+    session.flush()
+
     data_root = Path(settings.data_dir)
     for transaction in transactions:
         for attachment in transaction.attachments:

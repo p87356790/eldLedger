@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { Box, Container, Typography } from "@mui/material";
 
 import {
@@ -18,6 +18,7 @@ import { clearSession, getAccessToken, onSessionExpired } from "./api/session";
 import { useIdleLogout } from "./hooks/useIdleLogout";
 import { clearLastActivity, markActivity, sessionIdleExpired } from "./utils/idle";
 import { AccountPage } from "./components/AccountPage";
+import { BillsPage } from "./components/BillsPage";
 import { AccountsPage } from "./components/AccountsPage";
 import { AppHeader } from "./components/AppHeader";
 import { AutoRulesPage } from "./components/AutoRulesPage";
@@ -34,10 +35,31 @@ import { UsersPage } from "./components/UsersPage";
 type BootState = "loading" | "setup" | "login" | "ready";
 
 function AppShell({ user, onLogout }: { user: AuthUser; onLogout: () => Promise<void> }) {
+  const location = useLocation();
+  const recordsPage = location.pathname === "/";
   return (
-    <Box sx={{ minHeight: "100vh", bgcolor: "background.default", pb: { xs: 4, md: 6 } }}>
+    <Box
+      sx={{
+        height: "100dvh",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        bgcolor: "background.default",
+      }}
+    >
       <AppHeader user={user} onLogout={onLogout} />
-      <Container maxWidth="lg" sx={{ pt: { xs: 2, sm: 3 } }}>
+      <Container
+        maxWidth="lg"
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          overflow: recordsPage ? "hidden" : "auto",
+          pt: { xs: 2, sm: 3 },
+          pb: recordsPage ? { xs: 2, sm: 3 } : { xs: 4, md: 6 },
+        }}
+      >
         <Outlet />
       </Container>
     </Box>
@@ -208,6 +230,10 @@ function App() {
           }
         />
         <Route
+          path="/bills"
+          element={<BillsPage categories={categories} wallets={wallets} onRefresh={refresh} />}
+        />
+        <Route
           path="/dashboard"
           element={
             <DashboardPage
@@ -219,7 +245,7 @@ function App() {
             />
           }
         />
-        <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/reports" element={<ReportsPage wallets={wallets} accounts={accounts} />} />
         <Route path="/settings" element={<SettingsLayout isAdmin={currentUser.role === "ADMIN"} />}>
           <Route index element={<Navigate to="accounts" replace />} />
           <Route
@@ -236,7 +262,7 @@ function App() {
           />
           <Route
             path="backup"
-            element={<DataBackupPage isAdmin={currentUser.role === "ADMIN"} onImported={refresh} />}
+            element={<DataBackupPage isAdmin={currentUser.role === "ADMIN"} onImported={refresh} onRestored={handleLogout} />}
           />
           <Route
             path="profile"
