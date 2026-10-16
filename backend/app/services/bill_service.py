@@ -1,14 +1,20 @@
 from datetime import date, timedelta
+from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from app.models import Account, Bill, Category, User
+from app.models import Account, Attachment, Bill, Category, User
 from app.models.enums import BillStatus, TransactionType
 from app.schemas.accounting import TransactionCreate, TransactionItemCreate
 from app.schemas.bills import BillCreate, BillPay, BillUpdate
 from app.services.accounting_service import AccountingError
-from app.services.transaction_service import TransactionService
+from app.services.transaction_service import (
+    TransactionService,
+    delete_unreferenced_attachment_files,
+    resolve_attachment_path,
+    store_attachment_bytes,
+)
 
 
 def add_months(value: date, months: int) -> date:
@@ -33,6 +39,7 @@ class BillService:
         rows = list(
             self._session.scalars(
                 select(Bill)
+                .options(selectinload(Bill.attachments))
                 .where(Bill.organization_id == user.organization_id)
                 .where(Bill.created_by_user_id == user.id)
             )
@@ -86,8 +93,10 @@ class BillService:
         bill = self._require_own(user, bill_id)
         if bill.status != BillStatus.OPEN:
             raise AccountingError("이미 지불한 청구는 지울 수 없어요. 기록 화면에서 그 지출을 정정하세요.")
+        paths = [item.stored_path for item in list(bill.attachments)]
         self._session.delete(bill)
         self._session.flush()
+        delete_unreferenced_attachment_files(self._session, paths)
 
     def pay(self, user: User, bill_id: int, payload: BillPay) -> Bill:
         bill = self._require_own(user, bill_id)
@@ -120,10 +129,65 @@ class BillService:
         bill.paid_on = payload.occurred_on
         bill.transaction_id = transaction.id
         bill.payment_account_id = payload.payment_account_id
+        for source in list(bill.attachments):
+            self._session.add(
+                Attachment(
+                    transaction_id=transaction.id,
+                    bill_id=None,
+                    original_filename=source.original_filename,
+                    stored_path=source.stored_path,
+                    content_type=source.content_type,
+                    file_size=source.file_size,
+                )
+            )
         self._session.flush()
+        self._session.expire(transaction, ["attachments"])
         if bill.repeats_monthly:
             self._spawn_next_month(user, bill)
         return bill
+
+    def add_attachment(
+        self,
+        user: User,
+        bill_id: int,
+        *,
+        original_filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> Attachment:
+        bill = self._require_own(user, bill_id)
+        if bill.status != BillStatus.OPEN:
+            raise AccountingError("이미 낸 청구의 청구서는 기록 화면에서 고칠 수 있어요.")
+        attachment = store_attachment_bytes(
+            occurred_on=bill.billed_on,
+            original_filename=original_filename,
+            content=content,
+            content_type=content_type,
+            bill_id=bill.id,
+        )
+        self._session.add(attachment)
+        self._session.flush()
+        self._session.expire(bill, ["attachments"])
+        return attachment
+
+    def unlink_attachment(self, user: User, bill_id: int, attachment_id: int) -> None:
+        """Drop the invoice from this bill and leave the file on disk."""
+        bill = self._require_own(user, bill_id)
+        if bill.status != BillStatus.OPEN:
+            raise AccountingError("이미 낸 청구의 청구서는 기록 화면에서 고칠 수 있어요.")
+        attachment = next((item for item in bill.attachments if item.id == attachment_id), None)
+        if attachment is None:
+            raise LookupError("청구서를 찾을 수 없습니다.")
+        self._session.delete(attachment)
+        self._session.flush()
+        self._session.expire(bill, ["attachments"])
+
+    def get_attachment_file(self, user: User, bill_id: int, attachment_id: int) -> tuple[Attachment, Path]:
+        bill = self._require_own(user, bill_id)
+        attachment = next((item for item in bill.attachments if item.id == attachment_id), None)
+        if attachment is None:
+            raise LookupError("청구서를 찾을 수 없습니다.")
+        return attachment, resolve_attachment_path(attachment)
 
     def _spawn_next_month(self, user: User, paid: Bill) -> None:
         next_billed = add_months(paid.billed_on, 1)

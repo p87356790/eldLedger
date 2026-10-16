@@ -3,6 +3,7 @@ from datetime import date
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import BillStatus, Scope
+from app.schemas.accounting import AttachmentRead
 
 
 class BillWrite(BaseModel):
@@ -61,3 +62,4 @@ class BillRead(BaseModel):
     status: BillStatus
     paid_on: date | None
     transaction_id: int | None
+    attachments: list[AttachmentRead] = Field(default_factory=list)

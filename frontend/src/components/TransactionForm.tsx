@@ -33,6 +33,7 @@ import {
   createTransaction,
   getOrganizationId,
   updateTransaction,
+  detachAttachment,
   uploadAttachment,
 } from "../api/client";
 import type { Account, Attachment, Category, Scope, Tag, Transaction, TransactionType } from "../api/client";
@@ -261,6 +262,7 @@ export function TransactionForm({
   const [deductions, setDeductions] = useState<LineRow[]>([newLineRow()]);
   const [expenseLines, setExpenseLines] = useState<LineRow[]>([newLineRow(), newLineRow()]);
   const [files, setFiles] = useState<File[]>([]);
+  const [removedAttachmentIds, setRemovedAttachmentIds] = useState<number[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -271,7 +273,27 @@ export function TransactionForm({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropDepthRef = useRef<number>(0);
   const isEditing = editing != null;
-  const savedAttachments = editing?.attachments ?? EMPTY_ATTACHMENTS;
+  const savedAttachments = (editing?.attachments ?? EMPTY_ATTACHMENTS).filter(
+    (attachment) => !removedAttachmentIds.includes(attachment.id),
+  );
+
+  useEffect(() => {
+    setRemovedAttachmentIds([]);
+  }, [editing?.id]);
+
+  const handleRemoveSaved = async (attachmentId: number): Promise<void> => {
+    if (editing == null) {
+      return;
+    }
+    setError(null);
+    try {
+      await detachAttachment(editing.id, attachmentId);
+      setRemovedAttachmentIds((current) => [...current, attachmentId]);
+      await onSaved();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "영수증을 빼지 못했어요.");
+    }
+  };
 
   useEffect(() => {
     if (editing == null) {
@@ -1098,7 +1120,7 @@ export function TransactionForm({
               </Typography>
             ) : (
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                사진을 누르면 영수증을 크게 볼 수 있어요.
+                사진을 누르면 크게 볼 수 있어요. 빼기는 이 기록에서만 끊고, 파일은 그대로 둡니다.
               </Typography>
             )}
             <ReceiptGallery
@@ -1106,6 +1128,7 @@ export function TransactionForm({
               attachments={savedAttachments}
               pendingFiles={files}
               onRemovePending={(file) => setFiles(files.filter((item) => item !== file))}
+              onRemoveSaved={(attachmentId) => void handleRemoveSaved(attachmentId)}
               onOpenSaved={(index) =>
                 setReceiptTarget({
                   kind: "saved",

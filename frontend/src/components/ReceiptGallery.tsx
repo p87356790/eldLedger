@@ -5,7 +5,7 @@ import ReceiptLongIcon from "@mui/icons-material/ReceiptLong";
 import { Box, IconButton, Stack, Typography } from "@mui/material";
 
 import { fetchAttachmentFile } from "../api/client";
-import type { Attachment } from "../api/client";
+import type { Attachment, AttachmentFile } from "../api/client";
 import { isPdfContentType, isPreviewableImage } from "../utils/receipts";
 
 interface ReceiptGalleryProps {
@@ -13,8 +13,10 @@ interface ReceiptGalleryProps {
   attachments?: Attachment[];
   pendingFiles?: File[];
   onRemovePending?: (file: File) => void;
+  onRemoveSaved?: (attachmentId: number) => void;
   onOpenSaved?: (index: number) => void;
   onOpenPending?: (index: number) => void;
+  loadSaved?: (attachmentId: number) => Promise<AttachmentFile>;
 }
 
 interface Thumbnail {
@@ -107,14 +109,18 @@ export function ReceiptGallery({
   attachments = [],
   pendingFiles = [],
   onRemovePending,
+  onRemoveSaved,
   onOpenSaved,
   onOpenPending,
+  loadSaved,
 }: ReceiptGalleryProps) {
   const [savedUrls, setSavedUrls] = useState<Record<number, string>>({});
   const [pendingUrls, setPendingUrls] = useState<string[]>([]);
 
   useEffect(() => {
-    if (transactionId == null || attachments.length === 0) {
+    const loader =
+      loadSaved ?? (transactionId == null ? null : (attachmentId: number) => fetchAttachmentFile(transactionId, attachmentId));
+    if (loader == null || attachments.length === 0) {
       setSavedUrls({});
       return;
     }
@@ -124,7 +130,7 @@ export function ReceiptGallery({
       const next: Record<number, string> = {};
       for (const attachment of attachments) {
         try {
-          const file = await fetchAttachmentFile(transactionId, attachment.id);
+          const file = await loader(attachment.id);
           if (cancelled) {
             return;
           }
@@ -146,7 +152,7 @@ export function ReceiptGallery({
       cancelled = true;
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [transactionId, attachments]);
+  }, [transactionId, attachments, loadSaved]);
 
   useEffect(() => {
     const urls = pendingFiles.map((file) => URL.createObjectURL(file));
@@ -163,6 +169,7 @@ export function ReceiptGallery({
       url: savedUrls[attachment.id] ?? null,
       contentType: attachment.content_type,
       onOpen: () => onOpenSaved?.(index),
+      onRemove: onRemoveSaved == null ? undefined : () => onRemoveSaved(attachment.id),
     })),
     ...pendingFiles.map((file, index) => ({
       key: `pending-${file.name}-${file.size}-${file.lastModified}`,

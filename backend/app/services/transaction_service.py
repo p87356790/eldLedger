@@ -28,6 +28,67 @@ def attachment_relative_path(occurred_on: date, stored_name: str) -> Path:
     return Path("uploads") / occurred_on.strftime("%Y-%m") / stored_name
 
 
+def store_attachment_bytes(
+    *,
+    occurred_on: date,
+    original_filename: str,
+    content: bytes,
+    content_type: str,
+    transaction_id: int | None = None,
+    bill_id: int | None = None,
+) -> Attachment:
+    if (transaction_id is None) == (bill_id is None):
+        raise AccountingError("파일을 붙일 대상을 정하지 못했습니다.")
+    suffix = Path(original_filename).suffix.lower()
+    if suffix not in ALLOWED_ATTACHMENT_SUFFIXES:
+        raise AccountingError("영수증은 JPG, PNG, WEBP, HEIC, PDF만 올릴 수 있습니다.")
+    normalized_type = content_type.split(";")[0].strip().lower() or "application/octet-stream"
+    if normalized_type not in ALLOWED_ATTACHMENT_TYPES and suffix not in ALLOWED_ATTACHMENT_SUFFIXES:
+        raise AccountingError("지원하지 않는 파일 형식입니다.")
+    if len(content) == 0:
+        raise AccountingError("빈 파일은 올릴 수 없습니다.")
+    if len(content) > MAX_ATTACHMENT_BYTES:
+        raise AccountingError("파일 크기는 10MB 이하여야 합니다.")
+
+    stored_name = f"{uuid4().hex}{suffix}"
+    relative_path = attachment_relative_path(occurred_on, stored_name)
+    destination = Path(settings.data_dir) / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(content)
+    return Attachment(
+        transaction_id=transaction_id,
+        bill_id=bill_id,
+        original_filename=original_filename[:255],
+        stored_path=relative_path.as_posix(),
+        content_type=normalized_type,
+        file_size=len(content),
+    )
+
+
+def resolve_attachment_path(attachment: Attachment) -> Path:
+    data_root = Path(settings.data_dir).resolve()
+    stored = Path(attachment.stored_path)
+    if stored.is_absolute() or ".." in stored.parts:
+        raise LookupError("영수증을 찾을 수 없습니다.")
+    path = (data_root / stored).resolve()
+    if not path.is_relative_to(data_root) or not path.is_file():
+        raise LookupError("영수증을 찾을 수 없습니다.")
+    return path
+
+
+def delete_unreferenced_attachment_files(session: Session, paths: list[str]) -> None:
+    for stored_path in paths:
+        still = session.scalar(select(Attachment.id).where(Attachment.stored_path == stored_path).limit(1))
+        if still is not None:
+            continue
+        stored = Path(stored_path)
+        if stored.is_absolute() or ".." in stored.parts:
+            continue
+        destination = Path(settings.data_dir) / stored
+        if destination.is_file():
+            destination.unlink()
+
+
 class TransactionService:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -186,51 +247,34 @@ class TransactionService:
         content_type: str,
     ) -> Attachment:
         transaction = self.get(transaction_id)
-        suffix = Path(original_filename).suffix.lower()
-        if suffix not in ALLOWED_ATTACHMENT_SUFFIXES:
-            raise AccountingError("영수증은 JPG, PNG, WEBP, HEIC, PDF만 올릴 수 있습니다.")
-        normalized_type = content_type.split(";")[0].strip().lower() or "application/octet-stream"
-        if normalized_type not in ALLOWED_ATTACHMENT_TYPES and suffix not in ALLOWED_ATTACHMENT_SUFFIXES:
-            raise AccountingError("지원하지 않는 파일 형식입니다.")
-        if len(content) == 0:
-            raise AccountingError("빈 파일은 올릴 수 없습니다.")
-        if len(content) > MAX_ATTACHMENT_BYTES:
-            raise AccountingError("파일 크기는 10MB 이하여야 합니다.")
-
-        stored_name = f"{uuid4().hex}{suffix}"
-        relative_path = attachment_relative_path(transaction.occurred_on, stored_name)
-        destination = Path(settings.data_dir) / relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
-
-        attachment = Attachment(
+        attachment = store_attachment_bytes(
+            occurred_on=transaction.occurred_on,
+            original_filename=original_filename,
+            content=content,
+            content_type=content_type,
             transaction_id=transaction.id,
-            original_filename=original_filename[:255],
-            stored_path=relative_path.as_posix(),
-            content_type=normalized_type,
-            file_size=len(content),
         )
         self._session.add(attachment)
         self._session.flush()
         self._session.expire(transaction, ["attachments"])
         return attachment
 
+    def unlink_attachment(self, transaction_id: int, attachment_id: int) -> None:
+        """Drop the receipt from this record and leave the file on disk."""
+        transaction = self.get(transaction_id)
+        attachment = next((item for item in transaction.attachments if item.id == attachment_id), None)
+        if attachment is None:
+            raise LookupError("영수증을 찾을 수 없습니다.")
+        self._session.delete(attachment)
+        self._session.flush()
+        self._session.expire(transaction, ["attachments"])
+
     def get_attachment_file(self, transaction_id: int, attachment_id: int) -> tuple[Attachment, Path]:
         transaction = self.get(transaction_id)
         attachment = next((item for item in transaction.attachments if item.id == attachment_id), None)
         if attachment is None:
             raise LookupError("영수증을 찾을 수 없습니다.")
-        return attachment, self._resolve_attachment_path(attachment)
-
-    def _resolve_attachment_path(self, attachment: Attachment) -> Path:
-        data_root = Path(settings.data_dir).resolve()
-        stored = Path(attachment.stored_path)
-        if stored.is_absolute() or ".." in stored.parts:
-            raise LookupError("영수증을 찾을 수 없습니다.")
-        path = (data_root / stored).resolve()
-        if not path.is_relative_to(data_root) or not path.is_file():
-            raise LookupError("영수증을 찾을 수 없습니다.")
-        return path
+        return attachment, resolve_attachment_path(attachment)
 
     def replace_tags(self, transaction: Transaction, tag_ids: list[int]) -> None:
         transaction.transaction_tags.clear()

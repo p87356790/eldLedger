@@ -19,6 +19,7 @@ import { useIdleLogout } from "./hooks/useIdleLogout";
 import { clearLastActivity, markActivity, sessionIdleExpired } from "./utils/idle";
 import { AccountPage } from "./components/AccountPage";
 import { BillsPage } from "./components/BillsPage";
+import { CardStatementsPage } from "./components/CardStatementsPage";
 import { AccountsPage } from "./components/AccountsPage";
 import { AppHeader } from "./components/AppHeader";
 import { AutoRulesPage } from "./components/AutoRulesPage";
@@ -233,6 +234,7 @@ function App() {
           path="/bills"
           element={<BillsPage categories={categories} wallets={wallets} onRefresh={refresh} />}
         />
+        <Route path="/card-statements" element={<CardStatementsPage onRefresh={refresh} />} />
         <Route
           path="/dashboard"
           element={

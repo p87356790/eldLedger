@@ -17,6 +17,7 @@ from app.models import (
     Account,
     AutoCategoryRule,
     Bill,
+    CardStatement,
     Category,
     Organization,
     Tag,
@@ -64,9 +65,17 @@ def reset_user_ledger(session: Session, user: User) -> int:
         )
     )
     tx_count = len(transactions)
-    bills = list(session.scalars(select(Bill).where(Bill.created_by_user_id == user.id)))
+    bills = list(
+        session.scalars(
+            select(Bill).options(selectinload(Bill.attachments)).where(Bill.created_by_user_id == user.id)
+        )
+    )
+    bill_paths = [attachment.stored_path for bill in bills for attachment in bill.attachments]
     for bill in bills:
         session.delete(bill)
+    statements = list(session.scalars(select(CardStatement).where(CardStatement.created_by_user_id == user.id)))
+    for statement in statements:
+        session.delete(statement)
     session.flush()
 
     data_root = Path(settings.data_dir)
@@ -75,6 +84,10 @@ def reset_user_ledger(session: Session, user: User) -> int:
             stored = data_root / attachment.stored_path
             if stored.is_file():
                 stored.unlink(missing_ok=True)
+    for stored_path in bill_paths:
+        stored = data_root / stored_path
+        if stored.is_file():
+            stored.unlink(missing_ok=True)
 
     entry_ids = [entry.id for transaction in transactions for entry in transaction.journal_entries]
     wallets = list(

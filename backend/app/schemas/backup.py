@@ -88,6 +88,20 @@ class LedgerTransaction(BaseModel):
     attachments: list[LedgerAttachment] = Field(default_factory=list)
 
 
+class LedgerCardStatement(BaseModel):
+    id: int
+    card_account_id: int
+    bank_account_id: int | None = None
+    period_start: date
+    period_end: date
+    pay_on: date
+    amount: int = Field(..., gt=0)
+    amount_locked: bool = False
+    status: BillStatus
+    paid_on: date | None = None
+    transaction_id: int | None = None
+
+
 class LedgerBill(BaseModel):
     id: int
     title: str = Field(..., min_length=1, max_length=255)
@@ -102,6 +116,7 @@ class LedgerBill(BaseModel):
     status: BillStatus
     paid_on: date | None = None
     transaction_id: int | None = None
+    attachments: list[LedgerAttachment] = Field(default_factory=list)
 
 
 class LedgerBundle(BaseModel):
@@ -115,6 +130,7 @@ class LedgerBundle(BaseModel):
     rules: list[LedgerRule] = Field(default_factory=list)
     transactions: list[LedgerTransaction] = Field(default_factory=list)
     bills: list[LedgerBill] = Field(default_factory=list)
+    card_statements: list[LedgerCardStatement] = Field(default_factory=list)
 
 
 class LedgerImportResult(BaseModel):
@@ -127,6 +143,7 @@ class LedgerImportResult(BaseModel):
     transactions_created: int
     attachments_created: int
     bills_created: int = 0
+    card_statements_created: int = 0
     replaced_transactions: int
 
 

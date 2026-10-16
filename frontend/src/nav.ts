@@ -25,6 +25,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
 export const MAIN_NAV: Array<{ path: string; label: string }> = [
   { path: "/", label: "기록" },
   { path: "/bills", label: "청구" },
+  { path: "/card-statements", label: "카드 정산" },
   { path: "/dashboard", label: "대시보드" },
   { path: "/reports", label: "보고서" },
 ];

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -25,12 +25,18 @@ import {
 import {
   createBill,
   deleteBill,
+  detachBillAttachment,
+  fetchBillAttachmentFile,
   fetchBills,
   getOrganizationId,
   payBill,
   updateBill,
+  uploadBillAttachment,
 } from "../api/client";
 import type { Bill, Category, WalletAccount } from "../api/client";
+import { ReceiptGallery } from "./ReceiptGallery";
+import { ReceiptViewerDialog } from "./ReceiptViewerDialog";
+import type { ReceiptViewerTarget } from "./ReceiptViewerDialog";
 import { categoryLabel, flattenCategoryTree } from "../utils/categories";
 import { formatDisplayDate, formatWon, formatWonWithSymbol, parseWon, todayIsoDate } from "../utils/money";
 
@@ -90,6 +96,9 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<boolean>(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [viewer, setViewer] = useState<ReceiptViewerTarget | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const expenseCategories = useMemo(
     () => flattenCategoryTree(categories.filter((category) => category.transaction_type === "EXPENSE" && category.is_active)),
@@ -120,9 +129,21 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
     setForm((current) => ({ ...current, ...partial }));
   };
 
+  const editingBill = editingId === null ? null : (bills.find((bill) => bill.id === editingId) ?? null);
+  const loadSaved = useCallback(
+    (attachmentId: number) => {
+      if (editingId === null) {
+        return Promise.reject(new Error("청구를 찾을 수 없어요."));
+      }
+      return fetchBillAttachmentFile(editingId, attachmentId);
+    },
+    [editingId],
+  );
+
   const startEdit = (bill: Bill): void => {
     setEditingId(bill.id);
     setForm(formFromBill(bill));
+    setPendingFiles([]);
     setSuccess(null);
     setError(null);
   };
@@ -130,6 +151,15 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
   const cancelEdit = (): void => {
     setEditingId(null);
     setForm(emptyForm());
+    setPendingFiles([]);
+  };
+
+  const addInvoiceFiles = (selected: FileList | File[]): void => {
+    const next = Array.from(selected);
+    if (next.length === 0) {
+      return;
+    }
+    setPendingFiles((current) => [...current, ...next]);
   };
 
   const save = async (): Promise<void> => {
@@ -151,21 +181,48 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
     };
     setSubmitting(true);
     setError(null);
+    let savedId = editingId;
     try {
-      if (editingId === null) {
-        await createBill({ ...payload, organization_id: getOrganizationId() });
-        setSuccess("청구를 적어 두었어요. 실제로 내면 지불을 누르세요.");
-        setForm(emptyForm());
-      } else {
-        await updateBill(editingId, payload);
-        setSuccess("청구를 고쳤어요.");
-        cancelEdit();
+      const saved =
+        editingId === null
+          ? await createBill({ ...payload, organization_id: getOrganizationId() })
+          : await updateBill(editingId, payload);
+      savedId = saved.id;
+      const remaining = [...pendingFiles];
+      for (const file of pendingFiles) {
+        await uploadBillAttachment(saved.id, file);
+        remaining.shift();
+        setPendingFiles([...remaining]);
       }
+      setEditingId(null);
+      setForm(emptyForm());
+      setSuccess(
+        editingId === null
+          ? "청구를 적어 두었어요. 실제로 내면 지불을 누르세요."
+          : "청구를 고쳤어요.",
+      );
       await load();
     } catch (caught: unknown) {
+      if (savedId !== null && editingId === null) {
+        setEditingId(savedId);
+      }
       setError(caught instanceof Error ? caught.message : "저장하지 못했어요.");
+      await load().catch(() => undefined);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const removeSavedInvoice = async (attachmentId: number): Promise<void> => {
+    if (editingId === null) {
+      return;
+    }
+    setError(null);
+    try {
+      await detachBillAttachment(editingId, attachmentId);
+      await load();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "청구서를 빼지 못했어요.");
     }
   };
 
@@ -359,6 +416,44 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
               }
               label="지불하면 다음 달 청구도 만들기"
             />
+            <Box>
+              <input
+                ref={fileInputRef}
+                type="file"
+                hidden
+                accept=".jpg,.jpeg,.png,.webp,.heic,.pdf,image/*,application/pdf"
+                multiple
+                onChange={(event) => {
+                  const selected = event.target.files;
+                  if (selected !== null) {
+                    addInvoiceFiles(selected);
+                  }
+                  event.target.value = "";
+                }}
+              />
+              <Button variant="outlined" onClick={() => fileInputRef.current?.click()}>
+                영수증·청구서 넣기
+              </Button>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.75 }}>
+                사진이나 PDF를 붙일 수 있어요. 빼기는 이 청구에서만 끊고, 파일은 그대로 둡니다.
+              </Typography>
+              <ReceiptGallery
+                attachments={editingBill?.attachments ?? []}
+                pendingFiles={pendingFiles}
+                loadSaved={editingId === null ? undefined : loadSaved}
+                onRemovePending={(file) =>
+                  setPendingFiles((current) => current.filter((item) => item !== file))
+                }
+                onRemoveSaved={(attachmentId) => void removeSavedInvoice(attachmentId)}
+                onOpenSaved={(index) => {
+                  if (editingBill === null) {
+                    return;
+                  }
+                  setViewer({ kind: "bill", billId: editingBill.id, attachments: editingBill.attachments, initialIndex: index });
+                }}
+                onOpenPending={(index) => setViewer({ kind: "local", files: pendingFiles, initialIndex: index })}
+              />
+            </Box>
             <Stack direction="row" spacing={1}>
               <Button variant="contained" disabled={submitting} onClick={() => void save()}>
                 {editingId === null ? "청구 등록" : "청구 고치기"}
@@ -410,13 +505,23 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
                       {bill.memo !== null && bill.memo !== "" && (
                         <Typography variant="body2">{bill.memo}</Typography>
                       )}
-                      <Stack direction="row" spacing={1}>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                         <Button variant="contained" onClick={() => openPay(bill)}>
                           지불
                         </Button>
                         <Button variant="outlined" onClick={() => startEdit(bill)}>
                           고치기
                         </Button>
+                        {bill.attachments.length > 0 && (
+                          <Button
+                            variant="outlined"
+                            onClick={() =>
+                              setViewer({ kind: "bill", billId: bill.id, attachments: bill.attachments })
+                            }
+                          >
+                            청구서 보기
+                          </Button>
+                        )}
                         <Button color="inherit" onClick={() => void remove(bill)}>
                           지우기
                         </Button>
@@ -448,6 +553,15 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
                     {bill.paid_on !== null ? `${formatDisplayDate(bill.paid_on)}에 냄` : "냄"}
                     {` · ${walletName(bill.payment_account_id)}`}
                   </Typography>
+                  {bill.attachments.length > 0 && (
+                    <Button
+                      size="small"
+                      sx={{ mt: 0.5 }}
+                      onClick={() => setViewer({ kind: "bill", billId: bill.id, attachments: bill.attachments })}
+                    >
+                      청구서 보기
+                    </Button>
+                  )}
                 </Box>
               ))}
             </Stack>
@@ -494,6 +608,7 @@ export function BillsPage({ categories, wallets, onRefresh }: BillsPageProps) {
           </Button>
         </DialogActions>
       </Dialog>
+      <ReceiptViewerDialog target={viewer} onClose={() => setViewer(null)} />
     </Stack>
   );
 }

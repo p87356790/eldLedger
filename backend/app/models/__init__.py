@@ -5,6 +5,7 @@ from app.models.attachment import Attachment
 from app.models.audit import AuditLog
 from app.models.base import Base
 from app.models.bill import Bill
+from app.models.card_statement import CardStatement
 from app.models.category import Category
 from app.models.auto_category_rule import AutoCategoryRule, AutoCategoryRuleTag
 from app.models.enums import (
@@ -37,6 +38,7 @@ __all__ = [
     "AutoCategoryRule",
     "Bill",
     "BillStatus",
+    "CardStatement",
     "AutoCategoryRuleTag",
     "Base",
     "Category",

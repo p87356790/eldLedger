@@ -71,7 +71,8 @@ export interface TransactionItem {
 
 export interface Attachment {
   id: number;
-  transaction_id: number;
+  transaction_id: number | null;
+  bill_id?: number | null;
   original_filename: string;
   content_type: string;
   file_size: number;
@@ -519,6 +520,7 @@ export interface Bill {
   status: BillStatus;
   paid_on: string | null;
   transaction_id: number | null;
+  attachments: Attachment[];
 }
 
 export interface BillWritePayload {
@@ -554,6 +556,79 @@ export function payBill(
   payload: { occurred_on: string; payment_account_id: number },
 ): Promise<Bill> {
   return sendJson<Bill>(`/api/v1/bills/${billId}/pay`, "POST", payload);
+}
+
+export async function uploadBillAttachment(billId: number, file: File): Promise<Attachment> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await authorizedFetch(`/api/v1/bills/${billId}/attachments`, {
+    method: "POST",
+    body,
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return (await response.json()) as Attachment;
+}
+
+export function detachBillAttachment(billId: number, attachmentId: number): Promise<void> {
+  return sendJson<void>(`/api/v1/bills/${billId}/attachments/${attachmentId}`, "DELETE", {});
+}
+
+export async function fetchBillAttachmentFile(billId: number, attachmentId: number): Promise<AttachmentFile> {
+  const response = await authorizedFetch(`/api/v1/bills/${billId}/attachments/${attachmentId}`);
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const blob = await response.blob();
+  const contentType = response.headers.get("content-type") ?? blob.type;
+  return {
+    blob,
+    filename: "",
+    contentType: contentType.split(";")[0].trim() || "application/octet-stream",
+  };
+}
+
+export interface CardStatementLine {
+  transaction_id: number;
+  occurred_on: string;
+  label: string;
+  signed_amount: number;
+}
+
+export interface CardStatement {
+  id: number;
+  card_account_id: number;
+  card_name: string;
+  bank_account_id: number | null;
+  bank_name: string | null;
+  title: string;
+  period_start: string;
+  period_end: string;
+  pay_on: string;
+  amount: number;
+  book_amount: number;
+  amount_locked: boolean;
+  status: BillStatus;
+  paid_on: string | null;
+  transaction_id: number | null;
+  lines: CardStatementLine[];
+}
+
+export function fetchCardStatements(organizationId: number = getOrganizationId()): Promise<CardStatement[]> {
+  return getJson<CardStatement[]>(`/api/v1/card-statements?organization_id=${organizationId}`);
+}
+
+export function updateCardStatement(statementId: number, amount: number): Promise<CardStatement> {
+  return sendJson<CardStatement>(`/api/v1/card-statements/${statementId}`, "PATCH", { amount });
+}
+
+export function payCardStatement(statementId: number, occurredOn: string): Promise<CardStatement> {
+  return sendJson<CardStatement>(`/api/v1/card-statements/${statementId}/pay`, "POST", { occurred_on: occurredOn });
+}
+
+export function detachAttachment(transactionId: number, attachmentId: number): Promise<void> {
+  return sendJson<void>(`/api/transactions/${transactionId}/attachments/${attachmentId}`, "DELETE", {});
 }
 
 export async function uploadAttachment(transactionId: number, file: File): Promise<Attachment> {
@@ -688,6 +763,7 @@ export interface LedgerImportResult {
   transactions_created: number;
   attachments_created: number;
   bills_created: number;
+  card_statements_created: number;
   replaced_transactions: number;
 }
 

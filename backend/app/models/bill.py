@@ -61,3 +61,8 @@ class Bill(IntPKMixin, TimestampMixin, Base):
     category: Mapped["Category"] = relationship("Category")
     payment_account: Mapped["Account | None"] = relationship("Account")
     transaction: Mapped["Transaction | None"] = relationship("Transaction")
+    attachments: Mapped[list["Attachment"]] = relationship(
+        "Attachment",
+        back_populates="bill",
+        cascade="all, delete-orphan",
+    )

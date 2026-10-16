@@ -10,7 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
-from app.models import Account, Attachment, AutoCategoryRule, Bill, Category, Organization, Transaction, User
+from app.models import (
+    Account,
+    Attachment,
+    AutoCategoryRule,
+    Bill,
+    CardStatement,
+    Category,
+    Organization,
+    Transaction,
+    User,
+)
 from app.models.enums import BillStatus, PaymentInstrumentKind, RecordStatus, TransactionType
 from app.models.journal import JournalLine
 from app.repositories.account_repository import AccountRepository
@@ -28,6 +38,7 @@ from app.schemas.backup import (
     LedgerAttachment,
     LedgerBill,
     LedgerBundle,
+    LedgerCardStatement,
     LedgerCategory,
     LedgerImportResult,
     LedgerItem,
@@ -46,7 +57,7 @@ from app.services.category_service import CategoryService
 from app.services.csv_import_service import CsvImportService
 from app.services.server_backup_service import find_database_member, is_full_server_backup_zip
 from app.services.tag_service import TagService
-from app.services.transaction_service import TransactionService
+from app.services.transaction_service import TransactionService, delete_unreferenced_attachment_files, store_attachment_bytes
 
 MAX_BACKUP_BYTES = 50 * 1024 * 1024
 FULL_BACKUP_IMPORT_HINT = (
@@ -112,6 +123,7 @@ class BackupService:
             if not replace:
                 raise LedgerConflictError("이미 거래가 있어요. 덮어쓰기를 선택한 뒤에 가져올 수 있어요.")
             self._delete_user_bills(user)
+            self._delete_user_card_statements(user)
             for transaction in existing:
                 self._transactions.cancel(transaction.id)
                 replaced += 1
@@ -363,6 +375,7 @@ class BackupService:
         rules = self._import_repo.list_rules(user.organization_id, owner_user_id=user.id)
         transactions = self._active_transactions(user)
         bills = self._user_bills(user)
+        card_statements = self._user_card_statements(user)
         return LedgerBundle(
             format=LEDGER_FORMAT,
             version=LEDGER_VERSION,
@@ -413,6 +426,7 @@ class BackupService:
             ],
             transactions=[self._transaction_row(row) for row in transactions],
             bills=[self._bill_row(row) for row in bills],
+            card_statements=[self._card_statement_row(row) for row in card_statements],
         )
 
     def _transaction_row(self, transaction: Transaction) -> LedgerTransaction:
@@ -460,20 +474,33 @@ class BackupService:
     def _attachment_bytes(self, bundle: LedgerBundle) -> dict[str, bytes]:
         files: dict[str, bytes] = {}
         ids = [row.id for row in bundle.transactions]
-        if not ids:
-            return files
-        loaded_rows = self._session.scalars(
-            select(Transaction).options(selectinload(Transaction.attachments)).where(Transaction.id.in_(ids))
-        ).all()
-        by_id = {row.id: row for row in loaded_rows}
-        for row in bundle.transactions:
-            loaded = by_id.get(row.id)
-            if loaded is None:
-                continue
-            for attachment, spec in zip(loaded.attachments, row.attachments, strict=False):
-                source = Path(settings.data_dir) / attachment.stored_path
-                if source.is_file():
-                    files[spec.path] = source.read_bytes()
+        if ids:
+            loaded_rows = self._session.scalars(
+                select(Transaction).options(selectinload(Transaction.attachments)).where(Transaction.id.in_(ids))
+            ).all()
+            by_id = {row.id: row for row in loaded_rows}
+            for row in bundle.transactions:
+                loaded = by_id.get(row.id)
+                if loaded is None:
+                    continue
+                for attachment, spec in zip(loaded.attachments, row.attachments, strict=False):
+                    source = Path(settings.data_dir) / attachment.stored_path
+                    if source.is_file():
+                        files[spec.path] = source.read_bytes()
+        bill_ids = [row.id for row in bundle.bills]
+        if bill_ids:
+            loaded_bills = self._session.scalars(
+                select(Bill).options(selectinload(Bill.attachments)).where(Bill.id.in_(bill_ids))
+            ).all()
+            bills_by_id = {row.id: row for row in loaded_bills}
+            for row in bundle.bills:
+                loaded = bills_by_id.get(row.id)
+                if loaded is None:
+                    continue
+                for attachment, spec in zip(loaded.attachments, row.attachments, strict=False):
+                    source = Path(settings.data_dir) / attachment.stored_path
+                    if source.is_file():
+                        files[spec.path] = source.read_bytes()
         return files
 
     def _restore_bundle(
@@ -494,7 +521,11 @@ class BackupService:
             tag_map,
             files,
         )
-        bills_created = self._restore_bills(user, bundle.bills, wallet_map, category_map, transaction_ids)
+        bills_created, bill_files = self._restore_bills(
+            user, bundle.bills, wallet_map, category_map, transaction_ids, files
+        )
+        created_files += bill_files
+        statements_created = self._restore_card_statements(user, bundle.card_statements, wallet_map, transaction_ids)
         return LedgerImportResult(
             wallets_created=wallet_map.created,
             wallets_matched=wallet_map.matched,
@@ -505,6 +536,7 @@ class BackupService:
             transactions_created=created_txs,
             attachments_created=created_files,
             bills_created=bills_created,
+            card_statements_created=statements_created,
             replaced_transactions=0,
         )
 
@@ -769,6 +801,21 @@ class BackupService:
         return created, attachments, transaction_ids
 
     def _bill_row(self, bill: Bill) -> LedgerBill:
+        attachments: list[LedgerAttachment] = []
+        used_names: set[str] = set()
+        for attachment in bill.attachments:
+            stored_name = Path(attachment.stored_path).name
+            if stored_name in used_names:
+                stored_name = f"{attachment.id}_{stored_name}"
+            used_names.add(stored_name)
+            attachments.append(
+                LedgerAttachment(
+                    original_filename=attachment.original_filename,
+                    content_type=attachment.content_type,
+                    file_size=int(attachment.file_size),
+                    path=f"bill-attachments/{bill.id}/{stored_name}",
+                )
+            )
         return LedgerBill(
             id=bill.id,
             title=bill.title,
@@ -783,6 +830,7 @@ class BackupService:
             status=bill.status,
             paid_on=bill.paid_on,
             transaction_id=bill.transaction_id,
+            attachments=attachments,
         )
 
     def _restore_bills(
@@ -792,8 +840,10 @@ class BackupService:
         wallets: "_IdMap",
         categories: "_IdMap",
         transaction_ids: dict[int, int],
-    ) -> int:
+        files: dict[str, bytes],
+    ) -> tuple[int, int]:
         created = 0
+        attachments = 0
         for row in rows:
             category_id = categories.ids.get(row.category_id)
             if category_id is None:
@@ -804,19 +854,87 @@ class BackupService:
             if status == BillStatus.PAID and row.transaction_id is not None and transaction_id is None:
                 status = BillStatus.OPEN
                 transaction_id = None
+            bill = Bill(
+                organization_id=user.organization_id,
+                created_by_user_id=user.id,
+                title=row.title,
+                amount=row.amount,
+                category_id=category_id,
+                scope=row.scope,
+                billed_on=row.billed_on,
+                pay_on=row.pay_on,
+                memo=row.memo,
+                payment_account_id=payment_id,
+                repeats_monthly=row.repeats_monthly,
+                status=status,
+                paid_on=row.paid_on if status == BillStatus.PAID else None,
+                transaction_id=transaction_id,
+            )
+            self._session.add(bill)
+            self._session.flush()
+            created += 1
+            for spec in row.attachments:
+                content = files.get(spec.path)
+                if content is None:
+                    continue
+                self._session.add(
+                    store_attachment_bytes(
+                        occurred_on=bill.billed_on,
+                        original_filename=spec.original_filename,
+                        content=content,
+                        content_type=spec.content_type,
+                        bill_id=bill.id,
+                    )
+                )
+                attachments += 1
+        if attachments:
+            self._session.flush()
+        return created, attachments
+
+    def _card_statement_row(self, statement: CardStatement) -> LedgerCardStatement:
+        return LedgerCardStatement(
+            id=statement.id,
+            card_account_id=statement.card_account_id,
+            bank_account_id=statement.bank_account_id,
+            period_start=statement.period_start,
+            period_end=statement.period_end,
+            pay_on=statement.pay_on,
+            amount=int(statement.amount),
+            amount_locked=statement.amount_locked,
+            status=statement.status,
+            paid_on=statement.paid_on,
+            transaction_id=statement.transaction_id,
+        )
+
+    def _restore_card_statements(
+        self,
+        user: User,
+        rows: list[LedgerCardStatement],
+        wallets: "_IdMap",
+        transaction_ids: dict[int, int],
+    ) -> int:
+        created = 0
+        for row in rows:
+            card_id = wallets.ids.get(row.card_account_id)
+            if card_id is None:
+                continue
+            bank_id = wallets.ids.get(row.bank_account_id) if row.bank_account_id is not None else None
+            transaction_id = transaction_ids.get(row.transaction_id) if row.transaction_id is not None else None
+            status = row.status
+            if status == BillStatus.PAID and row.transaction_id is not None and transaction_id is None:
+                status = BillStatus.OPEN
+                transaction_id = None
             self._session.add(
-                Bill(
+                CardStatement(
                     organization_id=user.organization_id,
                     created_by_user_id=user.id,
-                    title=row.title,
-                    amount=row.amount,
-                    category_id=category_id,
-                    scope=row.scope,
-                    billed_on=row.billed_on,
+                    card_account_id=card_id,
+                    bank_account_id=bank_id,
+                    period_start=row.period_start,
+                    period_end=row.period_end,
                     pay_on=row.pay_on,
-                    memo=row.memo,
-                    payment_account_id=payment_id,
-                    repeats_monthly=row.repeats_monthly,
+                    amount=row.amount,
+                    amount_locked=row.amount_locked,
                     status=status,
                     paid_on=row.paid_on if status == BillStatus.PAID else None,
                     transaction_id=transaction_id,
@@ -827,10 +945,26 @@ class BackupService:
             self._session.flush()
         return created
 
+    def _user_card_statements(self, user: User) -> list[CardStatement]:
+        return list(
+            self._session.scalars(
+                select(CardStatement)
+                .where(CardStatement.organization_id == user.organization_id)
+                .where(CardStatement.created_by_user_id == user.id)
+                .order_by(CardStatement.period_start.asc(), CardStatement.id.asc())
+            )
+        )
+
+    def _delete_user_card_statements(self, user: User) -> None:
+        for statement in self._user_card_statements(user):
+            self._session.delete(statement)
+        self._session.flush()
+
     def _user_bills(self, user: User) -> list[Bill]:
         return list(
             self._session.scalars(
                 select(Bill)
+                .options(selectinload(Bill.attachments))
                 .where(Bill.organization_id == user.organization_id)
                 .where(Bill.created_by_user_id == user.id)
                 .order_by(Bill.billed_on.asc(), Bill.id.asc())
@@ -838,9 +972,12 @@ class BackupService:
         )
 
     def _delete_user_bills(self, user: User) -> None:
-        for bill in self._user_bills(user):
+        bills = self._user_bills(user)
+        paths = [attachment.stored_path for bill in bills for attachment in bill.attachments]
+        for bill in bills:
             self._session.delete(bill)
         self._session.flush()
+        delete_unreferenced_attachment_files(self._session, paths)
 
     def _active_transactions(self, user: User) -> list[Transaction]:
         return list(
@@ -905,7 +1042,10 @@ def _read_bundle(payload: bytes) -> tuple[LedgerBundle, dict[str, bytes]]:
                 files = {
                     name.replace("\\", "/"): archive.read(name)
                     for name in names
-                    if name.replace("\\", "/").startswith("attachments/") and not name.endswith("/")
+                    if (
+                        name.replace("\\", "/").startswith(("attachments/", "bill-attachments/"))
+                        and not name.endswith("/")
+                    )
                 }
         except zipfile.BadZipFile as error:
             raise AccountingError("백업 ZIP 파일을 읽지 못했어요.") from error

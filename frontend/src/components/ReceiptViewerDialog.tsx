@@ -17,7 +17,7 @@ import {
   useTheme,
 } from "@mui/material";
 
-import { fetchAttachmentFile, fetchTransaction } from "../api/client";
+import { fetchAttachmentFile, fetchBillAttachmentFile, fetchTransaction } from "../api/client";
 import type { Attachment } from "../api/client";
 import { canPreviewInline, isPdfContentType, isPreviewableImage } from "../utils/receipts";
 
@@ -28,9 +28,15 @@ export type ReceiptViewerTarget =
       attachments?: Attachment[];
       initialIndex?: number;
     }
-  | {
+    | {
       kind: "local";
       files: File[];
+      initialIndex?: number;
+    }
+    | {
+      kind: "bill";
+      billId: number;
+      attachments: Attachment[];
       initialIndex?: number;
     };
 
@@ -93,6 +99,30 @@ export function ReceiptViewerDialog({ target, onClose }: ReceiptViewerDialogProp
               url,
               contentType: file.type || "application/octet-stream",
               downloadable: false,
+            });
+          }
+        } else if (target.kind === "bill") {
+          if (target.attachments.length === 0) {
+            setError("첨부된 청구서가 없어요.");
+            setLoading(false);
+            return;
+          }
+          for (const attachment of target.attachments) {
+            const file = await fetchBillAttachmentFile(target.billId, attachment.id);
+            if (cancelled) {
+              return;
+            }
+            const blob =
+              file.contentType !== "" && file.blob.type === ""
+                ? new Blob([file.blob], { type: file.contentType })
+                : file.blob;
+            const url = URL.createObjectURL(blob);
+            objectUrls.push(url);
+            loaded.push({
+              name: attachment.original_filename,
+              url,
+              contentType: file.contentType || attachment.content_type,
+              downloadable: true,
             });
           }
         } else {

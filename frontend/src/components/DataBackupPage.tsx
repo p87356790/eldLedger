@@ -70,6 +70,7 @@ function summarize(result: LedgerImportResult): string {
     `분류 ${result.categories_created}개 추가 · ${result.categories_matched}개 맞춤`,
     `거래 ${result.transactions_created}건`,
     result.bills_created > 0 ? `청구 ${result.bills_created}건` : null,
+    result.card_statements_created > 0 ? `카드 정산 ${result.card_statements_created}건` : null,
     result.attachments_created > 0 ? `증빙 ${result.attachments_created}개` : null,
     result.replaced_transactions > 0 ? `기존 거래 ${result.replaced_transactions}건 취소 후 복원` : null,
   ]

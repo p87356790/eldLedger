@@ -17,6 +17,7 @@ class Organization(IntPKMixin, TimestampMixin, Base):
     tags: Mapped[list["Tag"]] = relationship("Tag", back_populates="organization")
     transactions: Mapped[list["Transaction"]] = relationship("Transaction", back_populates="organization")
     bills: Mapped[list["Bill"]] = relationship("Bill", back_populates="organization")
+    card_statements: Mapped[list["CardStatement"]] = relationship("CardStatement", back_populates="organization")
     journal_entries: Mapped[list["JournalEntry"]] = relationship("JournalEntry", back_populates="organization")
     settings: Mapped[list["Setting"]] = relationship("Setting", back_populates="organization")
     import_profiles: Mapped[list["ImportProfile"]] = relationship("ImportProfile", back_populates="organization")

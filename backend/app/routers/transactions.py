@@ -184,6 +184,21 @@ async def upload_attachment(
     return AttachmentRead.model_validate(attachment)
 
 
+@router.delete(
+    "/transactions/{transaction_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def unlink_attachment(
+    transaction_id: int,
+    attachment_id: int,
+    service: TransactionService = Depends(_service),
+) -> None:
+    try:
+        service.unlink_attachment(transaction_id, attachment_id)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
 @router.get("/transactions/{transaction_id}/attachments/{attachment_id}", response_model=None)
 def download_attachment(
     transaction_id: int,

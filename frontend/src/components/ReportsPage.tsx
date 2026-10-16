@@ -33,21 +33,29 @@ import {
   fetchBusinessReportSummary,
   fetchJournalBook,
   fetchTrialBalance,
+  fetchCardStatements,
   fetchTransactionLedger,
 } from "../api/client";
 import type {
   Account,
   AccountLedger,
   BusinessReportSummary,
+  CardStatement,
   JournalBookEntry,
   TrialBalanceResponse,
   TransactionLedgerRow,
   WalletAccount,
 } from "../api/client";
-import { formatWonWithSymbol } from "../utils/money";
+import { formatDisplayDate, formatWonWithSymbol } from "../utils/money";
 import { KIND_LABEL, KIND_ORDER, groupWallets } from "../utils/wallets";
 
-type ReportKind = "transaction-ledger" | "account-ledger" | "journal-book" | "trial-balance" | "business";
+type ReportKind =
+  | "transaction-ledger"
+  | "account-ledger"
+  | "card-statements"
+  | "journal-book"
+  | "trial-balance"
+  | "business";
 
 interface ReportItem {
   kind: ReportKind;
@@ -59,6 +67,12 @@ interface ReportItem {
 const REPORTS: ReportItem[] = [
   { kind: "transaction-ledger", title: "거래원장", hint: "날짜별로 들어온 돈과 나간 돈을 모아 봅니다.", advanced: false },
   { kind: "account-ledger", title: "계정별 원장", hint: "통장·분류 계정마다 잔액이 어떻게 쌓였는지 봅니다.", advanced: false },
+  {
+    kind: "card-statements",
+    title: "카드 정산",
+    hint: "지난달 카드 사용분과 이번 달 납부를 함께 봅니다.",
+    advanced: false,
+  },
   { kind: "journal-book", title: "분개장", hint: "고급: 거래가 장부에 어떻게 올라갔는지 봅니다.", advanced: true },
   { kind: "trial-balance", title: "시산표", hint: "고급: 계정 잔액이 맞는지 확인합니다.", advanced: true },
   { kind: "business", title: "사업자 보고서", hint: "사업으로 기록한 거래만 모아 엑셀로 받을 수 있습니다.", advanced: false },
@@ -89,6 +103,7 @@ export function ReportsPage({ wallets, accounts }: ReportsPageProps) {
   const [ledgers, setLedgers] = useState<AccountLedger[]>([]);
   const [trial, setTrial] = useState<TrialBalanceResponse | null>(null);
   const [business, setBusiness] = useState<BusinessReportSummary | null>(null);
+  const [cardStatements, setCardStatements] = useState<CardStatement[]>([]);
 
   const groupedWallets = useMemo(() => groupWallets(wallets.filter((wallet) => wallet.is_active)), [wallets]);
   const selected = REPORTS.find((item) => item.kind === kind) ?? null;
@@ -141,6 +156,13 @@ export function ReportsPage({ wallets, accounts }: ReportsPageProps) {
           const result = await fetchTrialBalance(query);
           if (!cancelled) {
             setTrial(result);
+          }
+          return;
+        }
+        if (kind === "card-statements") {
+          const rows = await fetchCardStatements();
+          if (!cancelled) {
+            setCardStatements(rows);
           }
           return;
         }
@@ -284,7 +306,7 @@ export function ReportsPage({ wallets, accounts }: ReportsPageProps) {
                     </Select>
                   </FormControl>
                 )}
-                {kind !== "business" && (
+                {kind !== "business" && kind !== "card-statements" && (
                   <FormControlLabel
                     sx={{ flexShrink: 0, ml: 0.5, mr: 0, whiteSpace: "nowrap" }}
                     control={
@@ -311,6 +333,9 @@ export function ReportsPage({ wallets, accounts }: ReportsPageProps) {
               </Box>
               {error !== null && <Alert severity="error">{error}</Alert>}
               {busy && <Typography color="text.secondary">불러오는 중…</Typography>}
+              {!busy && kind === "card-statements" && (
+                <CardStatementReport rows={cardStatements} dateFrom={dateFrom} dateTo={dateTo} />
+              )}
               {!busy && kind === "transaction-ledger" && (
                 <LedgerTable
                   empty="이 기간에 거래원장 줄이 없어요."
@@ -434,6 +459,60 @@ function JournalTable({ rows }: { rows: JournalBookEntry[] }) {
               line.memo ?? "",
             ])}
           />
+        </Box>
+      ))}
+    </Stack>
+  );
+}
+
+function CardStatementReport({
+  rows,
+  dateFrom,
+  dateTo,
+}: {
+  rows: CardStatement[];
+  dateFrom: string;
+  dateTo: string;
+}) {
+  const shown = rows.filter((row) => {
+    if (dateFrom !== "" && row.pay_on < dateFrom) {
+      return false;
+    }
+    if (dateTo !== "" && row.pay_on > dateTo) {
+      return false;
+    }
+    return true;
+  });
+  if (shown.length === 0) {
+    return <Typography color="text.secondary">이 기간에 카드 정산이 없어요.</Typography>;
+  }
+  return (
+    <Stack spacing={1.5}>
+      {shown.map((row) => (
+        <Box key={row.id} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1.5, p: 1.5 }}>
+          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" gap={0.5}>
+            <Typography sx={{ fontWeight: 800 }}>{row.title}</Typography>
+            <Typography sx={{ fontWeight: 800 }}>{formatWonWithSymbol(row.amount)}</Typography>
+          </Stack>
+          <Typography variant="body2" color="text.secondary">
+            {row.status === "PAID" && row.paid_on != null
+              ? `${formatDisplayDate(row.paid_on)}에 냄`
+              : `${formatDisplayDate(row.pay_on)}에 낼 금액`}
+            {row.bank_name != null ? ` · ${row.bank_name}` : ""}
+            {row.book_amount !== row.amount ? ` · 장부 사용액 ${formatWonWithSymbol(row.book_amount)}` : ""}
+          </Typography>
+          <Stack spacing={0.5} sx={{ mt: 1 }}>
+            {row.lines.map((line) => (
+              <Stack key={line.transaction_id} direction="row" justifyContent="space-between" gap={1}>
+                <Typography variant="body2">
+                  {formatDisplayDate(line.occurred_on)} {line.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 700, flexShrink: 0 }}>
+                  {formatWonWithSymbol(line.signed_amount)}
+                </Typography>
+              </Stack>
+            ))}
+          </Stack>
         </Box>
       ))}
     </Stack>

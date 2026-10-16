@@ -1,11 +1,13 @@
 import zipfile
 from datetime import date
 from io import BytesIO
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.init_db import seed_standard_data
 from app.models import Organization
 from app.models.journal import JournalEntry, JournalLine
@@ -230,3 +232,81 @@ def test_bill_backup_roundtrip(client: TestClient, db_session: Session) -> None:
     listed = client.get(f"/api/transactions?organization_id={organization.id}").json()
     assert listed["total"] == 1
     assert listed["items"][0]["id"] == rows[0]["transaction_id"]
+
+
+def test_bill_invoice_is_kept_and_copied_onto_the_expense(client: TestClient, db_session: Session) -> None:
+    organization = _seed(db_session)
+    wallets = _wallets(client, organization.id)
+    categories = _categories(client, organization.id)
+    created = client.post(
+        "/api/v1/bills",
+        json=_bill_payload(organization.id, categories["관리비"]["id"], payment_account_id=wallets["BANK"]["id"]),
+    )
+    assert created.status_code == 201, created.text
+    bill_id = created.json()["id"]
+
+    attached = client.post(
+        f"/api/v1/bills/{bill_id}/attachments",
+        files={"file": ("관리비청구서.jpg", b"\xff\xd8\xff\xd9", "image/jpeg")},
+    )
+    assert attached.status_code == 201, attached.text
+    attachment = attached.json()
+    stored = Path(settings.data_dir) / attachment["stored_path"]
+    assert stored.is_file()
+    assert attachment["bill_id"] == bill_id
+    assert attachment["transaction_id"] is None
+
+    viewed = client.get(f"/api/v1/bills/{bill_id}/attachments/{attachment['id']}")
+    assert viewed.status_code == 200, viewed.text
+    assert viewed.content == b"\xff\xd8\xff\xd9"
+
+    paid = client.post(
+        f"/api/v1/bills/{bill_id}/pay",
+        json={"occurred_on": "2026-10-20", "payment_account_id": wallets["BANK"]["id"]},
+    )
+    assert paid.status_code == 200, paid.text
+    expense_id = paid.json()["transaction_id"]
+    expense = client.get(f"/api/transactions/{expense_id}").json()
+    assert len(expense["attachments"]) == 1
+    assert expense["attachments"][0]["stored_path"] == attachment["stored_path"]
+    assert Path(settings.data_dir).joinpath(attachment["stored_path"]).read_bytes() == b"\xff\xd8\xff\xd9"
+
+    exported = client.get("/api/v1/backup/export")
+    assert exported.status_code == 200, exported.text
+    with zipfile.ZipFile(BytesIO(exported.content)) as archive:
+        names = archive.namelist()
+    assert any(name.startswith("bill-attachments/") for name in names)
+
+    restored = client.post(
+        "/api/v1/backup/import?replace=true",
+        files={"file": ("backup.zip", exported.content, "application/zip")},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["bills_created"] == 1
+    assert restored.json()["attachments_created"] >= 2
+    rows = client.get(f"/api/v1/bills?organization_id={organization.id}").json()
+    assert len(rows) == 1
+    assert len(rows[0]["attachments"]) == 1
+    restored_file = client.get(f"/api/v1/bills/{rows[0]['id']}/attachments/{rows[0]['attachments'][0]['id']}")
+    assert restored_file.status_code == 200
+    assert restored_file.content == b"\xff\xd8\xff\xd9"
+
+
+def test_unlinking_a_bill_invoice_keeps_the_file(client: TestClient, db_session: Session) -> None:
+    organization = _seed(db_session)
+    categories = _categories(client, organization.id)
+    created = client.post("/api/v1/bills", json=_bill_payload(organization.id, categories["관리비"]["id"]))
+    assert created.status_code == 201, created.text
+    bill_id = created.json()["id"]
+    attached = client.post(
+        f"/api/v1/bills/{bill_id}/attachments",
+        files={"file": ("invoice.pdf", b"%PDF-1.4", "application/pdf")},
+    )
+    assert attached.status_code == 201, attached.text
+    stored = Path(settings.data_dir) / attached.json()["stored_path"]
+    removed = client.delete(f"/api/v1/bills/{bill_id}/attachments/{attached.json()['id']}")
+    assert removed.status_code == 204, removed.text
+    assert stored.is_file()
+    assert stored.read_bytes() == b"%PDF-1.4"
+    missing = client.get(f"/api/v1/bills/{bill_id}/attachments/{attached.json()['id']}")
+    assert missing.status_code == 404
